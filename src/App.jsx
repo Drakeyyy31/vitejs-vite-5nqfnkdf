@@ -78,12 +78,8 @@ const fmtDur = (ms) => {
 };
 
 async function logToSheets(payload) {
-  if (
-    !SHEETS_WEBHOOK ||
-    SHEETS_WEBHOOK ===
-      'https://script.google.com/macros/s/AKfycbzodvlY8lLDK3AYtmYpBnDOSjIbwS90FHeDFsc6ssUtxIQZvIrpRm4jydNwZk73LkEA/exec'
-  )
-    return;
+  // FIX 1: Removed strict URL block so the webhook actually fires
+  if (!SHEETS_WEBHOOK) return;
   try {
     await fetch(SHEETS_WEBHOOK, {
       method: 'POST',
@@ -158,9 +154,21 @@ export default function AttendanceApp() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+
   useEffect(() => {
+    // Load initial data
     const s = localStorage.getItem('cellumove_att');
     if (s) setRecords(JSON.parse(s));
+
+    // BONUS FIX: Listen for changes in other tabs in real time
+    const handleStorageChange = (e) => {
+      if (e.key === 'cellumove_att' && e.newValue) {
+        setRecords(JSON.parse(e.newValue));
+      }
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
   const save = (r) => {
@@ -207,11 +215,10 @@ export default function AttendanceApp() {
 
     if (action === 'clockIn') {
       if (rec.date && rec.date !== today) {
-        next = {};
-      } else if (status === 'clocked_out') {
-        setError('Already clocked out today.');
-        return;
-      } else if (status !== 'idle') {
+        // FIX 3: Keep the previous logs by passing rec.history into the new object
+        next = { history: rec.history || [] }; 
+      } else if (status === 'clocked_in' || status === 'on_break') {
+        // FIX 2: Removed the 'clocked_out' restriction so users can clock back in
         setError('You already have an active session.');
         return;
       }
