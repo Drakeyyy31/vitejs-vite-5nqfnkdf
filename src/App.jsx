@@ -38,7 +38,9 @@ const AGENTS = [
   { name: 'Kisses', pin: '7241' },
   { name: 'Aljane', pin: '4863' },
   { name: 'Drakeyyy', pin: '0731' },
-  { name: 'Test', pin: '1234' }
+  { name: 'Egar', pin: '1234' },
+  { name: 'Lasgna', pin: '1234' },
+  { name: 'Sinclair', pin: '1234' }
 ];
 
 const MANAGERS = [
