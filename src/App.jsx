@@ -37,6 +37,7 @@ const AGENTS = [
   { name: 'Juliana', pin: '3958' },
   { name: 'Kisses', pin: '7241' },
   { name: 'Aljane', pin: '4863' },
+  { name: 'Drakeyyy', pin: '0731' }
 ];
 
 // ── Manager credentials — change these as needed ──
