@@ -595,14 +595,14 @@ export default function AttendanceApp() {
             <button
               className="btn"
               onClick={() => handleAction('clockIn')}
-              disabled={curStatus !== 'idle'}
+              disabled={curStatus === 'clocked_in' || curStatus === 'on_break'}
               style={{
                 gridColumn: '1/-1',
                 padding: 13,
                 borderRadius: 8,
                 fontSize: 13,
-                background: curStatus === 'idle' ? '#238636' : '#21262d',
-                color: curStatus === 'idle' ? '#fff' : '#484f58',
+                background: curStatus === 'idle' || curStatus === 'clocked_out' ? '#238636' : '#21262d',
+                color: curStatus === 'idle' || curStatus === 'clocked_out' ? '#fff' : '#484f58',
               }}
             >
               ▶ CLOCK IN
