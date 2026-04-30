@@ -42,10 +42,11 @@ const AGENTS = [
 
 // ── Manager credentials — change these as needed ──
 const MANAGERS = [
-  { name: 'Suley', password: 'mgr-suley-2026' },
-  { name: 'Manager2', password: 'mgr-m2-2026' },
-  { name: 'Manager3', password: 'mgr-m3-2026' },
-  { name: 'Manager4', password: 'mgr-m4-2026' },
+  { name: 'Suley', password: 'fndr-suley-2026' },
+  { name: 'Egar', password: 'mgr-Egar-2026' },
+  { name: 'Lasgna', password: 'mgr-Lasgna-2026' },
+  { name: 'Sinclair', password: 'mgr-Sinclair-2026' },
+  { name: 'Drakeyyy', password: 'mgr-Drakeyyy-2026' }
 ];
 
 const BREAK_LIMIT_MS = 60 * 60 * 1000;
