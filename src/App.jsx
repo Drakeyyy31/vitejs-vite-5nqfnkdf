@@ -40,7 +40,6 @@ const AGENTS = [
   { name: 'Drakeyyy', pin: '0731' }
 ];
 
-// ── Manager credentials — change these as needed ──
 const MANAGERS = [
   { name: 'Suley', password: 'fndr-suley-2026' },
   { name: 'Egar', password: 'mgr-Egar-2026' },
@@ -78,7 +77,6 @@ const fmtDur = (ms) => {
 };
 
 async function logToSheets(payload) {
-  // FIX 1: Removed strict URL block so the webhook actually fires
   if (!SHEETS_WEBHOOK) return;
   try {
     await fetch(SHEETS_WEBHOOK, {
@@ -143,6 +141,10 @@ export default function AttendanceApp() {
   const [filterAgent, setFilterAgent] = useState('all');
   const [filterDate, setFilterDate] = useState('');
 
+  // Global logs state
+  const [globalLogs, setGlobalLogs] = useState([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+
   // Manager auth state
   const [mgrAuthed, setMgrAuthed] = useState(false);
   const [mgrInput, setMgrInput] = useState('');
@@ -156,11 +158,9 @@ export default function AttendanceApp() {
   }, []);
 
   useEffect(() => {
-    // Load initial data
     const s = localStorage.getItem('cellumove_att');
     if (s) setRecords(JSON.parse(s));
 
-    // BONUS FIX: Listen for changes in other tabs in real time
     const handleStorageChange = (e) => {
       if (e.key === 'cellumove_att' && e.newValue) {
         setRecords(JSON.parse(e.newValue));
@@ -170,6 +170,26 @@ export default function AttendanceApp() {
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
+
+  // Fetch Global Logs when Log tab opens
+  useEffect(() => {
+    if (tab === 'log') {
+      const fetchLogs = async () => {
+        setIsLoadingLogs(true);
+        try {
+          const response = await fetch(SHEETS_WEBHOOK);
+          const data = await response.json();
+          const sortedData = data.sort((a, b) => b.timestamp - a.timestamp);
+          setGlobalLogs(sortedData);
+        } catch (error) {
+          console.error("Failed to fetch global logs:", error);
+        }
+        setIsLoadingLogs(false);
+      };
+      
+      fetchLogs();
+    }
+  }, [tab]);
 
   const save = (r) => {
     setRecords(r);
@@ -215,10 +235,8 @@ export default function AttendanceApp() {
 
     if (action === 'clockIn') {
       if (rec.date && rec.date !== today) {
-        // FIX 3: Keep the previous logs by passing rec.history into the new object
         next = { history: rec.history || [] }; 
       } else if (status === 'clocked_in' || status === 'on_break') {
-        // FIX 2: Removed the 'clocked_out' restriction so users can clock back in
         setError('You already have an active session.');
         return;
       }
@@ -308,15 +326,13 @@ export default function AttendanceApp() {
   const bLeft = breakLeft(curRec);
   const bUsed = breakUsed(curRec);
 
-  const allLogs = Object.entries(records)
-    .flatMap(([, rec]) => rec.history || [])
+  const allLogs = globalLogs
     .filter((l) => {
       if (filterAgent !== 'all' && l.agent !== filterAgent) return false;
       if (filterDate && l.date !== fmtDate(new Date(filterDate).getTime()))
         return false;
       return true;
     })
-    .sort((a, b) => b.timestamp - a.timestamp)
     .slice(0, 400);
 
   // ── Shared styles ──
@@ -768,6 +784,11 @@ export default function AttendanceApp() {
             >
               Attendance Log
             </div>
+            {isLoadingLogs && (
+              <span style={{ color: '#58a6ff', fontSize: 12, fontStyle: 'italic' }}>
+                Fetching global records...
+              </span>
+            )}
             <select
               value={filterAgent}
               onChange={(e) => setFilterAgent(e.target.value)}
@@ -840,7 +861,7 @@ export default function AttendanceApp() {
                 </tr>
               </thead>
               <tbody>
-                {allLogs.length === 0 && (
+                {allLogs.length === 0 && !isLoadingLogs && (
                   <tr>
                     <td
                       colSpan={5}
@@ -851,7 +872,7 @@ export default function AttendanceApp() {
                         fontStyle: 'italic',
                       }}
                     >
-                      No entries yet.
+                      No entries found.
                     </td>
                   </tr>
                 )}
