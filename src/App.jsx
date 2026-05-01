@@ -377,7 +377,7 @@ export default function AttendanceApp() {
 
       {/* Header & Tabs */}
       <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>CELLUMOVE · WEAVNONO LLC</div>
+        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>WEAVNONO LLC</div>
         <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 'clamp(26px,5vw,42px)', color: '#e6edf3', margin: 0, letterSpacing: -1 }}>ATTENDANCE <span style={{ color: '#58a6ff' }}>SYSTEM</span></h1>
         <div style={{ fontSize: 11, color: '#8b949e', marginTop: 8 }}>{new Date(now).toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} &nbsp; <span style={{ color: '#58a6ff', fontWeight: 500 }}>{new Date(now).toLocaleTimeString('en-PH')}</span></div>
       </div>
