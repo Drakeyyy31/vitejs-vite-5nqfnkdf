@@ -125,7 +125,7 @@ export default function AttendanceApp() {
       {view === 'register' && (
         <div style={cardStyle}>
           <h2 style={{ marginTop: 0 }}>Register</h2>
-          <input placeholder="Username (ex: Drakeyyy)" onChange={e => setRegForm({...regForm, name: e.target.value})} style={inputStyle} />
+          <input placeholder="Username" onChange={e => setRegForm({...regForm, name: e.target.value})} style={inputStyle} />
           <input placeholder="Password" type="password" onChange={e => setRegForm({...regForm, pin: e.target.value})} style={inputStyle} />
           <select onChange={e => setRegForm({...regForm, platform: e.target.value})} style={inputStyle}>
             <option>META</option><option>KANAL</option><option>Helpwave</option><option>Chargeback</option><option>DMCA</option>
