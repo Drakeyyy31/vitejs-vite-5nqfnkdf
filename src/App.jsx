@@ -3,19 +3,19 @@ import { useState, useEffect } from 'react';
 // Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6
 const AGENTS = [
   // ── 9am-5pm ──
-  { name: 'Eli', pin: '2674', shiftStart: 9, dayOff: 0, platform: 'DMCA', pColor: '#964b00' }, // Brown
-  { name: 'Mary', pin: '5819', shiftStart: 9, dayOff: 6, platform: 'Chargeback', pColor: '#f43f5e' }, // Rose
-  { name: 'Robert', pin: '7342', shiftStart: 9, dayOff: 5, platform: 'Chargeback', pColor: '#f43f5e' }, // Rose
+  { name: 'Eli', pin: '2674', shiftStart: 9, dayOff: 0, platform: 'DMCA', pColor: '#94a3b8' }, 
+  { name: 'Mary', pin: '5819', shiftStart: 9, dayOff: 6, platform: 'Chargeback', pColor: '#f43f5e' }, 
+  { name: 'Robert', pin: '7342', shiftStart: 9, dayOff: 5, platform: 'Chargeback', pColor: '#f43f5e' }, 
 
   // ── 7am-3pm ──
-  { name: 'Jon', pin: '8495', shiftStart: 7, dayOff: 0, platform: 'KANAL', pColor: '#eab308' }, // Yellow
-  { name: 'Porsha', pin: '6148', shiftStart: 7, dayOff: 6, platform: 'KANAL / Trustpilot', pColor: '#22c55e' }, // Green
-  { name: 'Hawuki', pin: '9507', shiftStart: 7, dayOff: 1, platform: 'Helpwave', pColor: '#f97316' }, // Orange
+  { name: 'Jon', pin: '8495', shiftStart: 7, dayOff: 0, platform: 'KANAL', pColor: '#eab308' }, 
+  { name: 'Porsha', pin: '6148', shiftStart: 7, dayOff: 6, platform: 'KANAL / Trustpilot', pColor: '#22c55e' }, 
+  { name: 'Hawuki', pin: '9507', shiftStart: 7, dayOff: 1, platform: 'Helpwave', pColor: '#f97316' }, 
   { name: 'Chris', pin: '5834', shiftStart: 7, dayOff: 5, platform: 'Helpwave', pColor: '#f97316' },
   { name: 'Icho', pin: '1537', shiftStart: 7, dayOff: 3, platform: 'Helpwave', pColor: '#f97316' },
   { name: 'Chin', pin: '3256', shiftStart: 7, dayOff: 4, platform: 'Helpwave', pColor: '#f97316' },
   { name: 'Marc', pin: '8364', shiftStart: 7, dayOff: 2, platform: 'Helpwave', pColor: '#f97316' },
-  { name: 'Art', pin: '9031', shiftStart: 7, dayOff: 2, platform: 'META', pColor: '#3b82f6' }, // Blue
+  { name: 'Art', pin: '9031', shiftStart: 7, dayOff: 2, platform: 'META', pColor: '#3b82f6' }, 
   { name: 'Charles', pin: '8237', shiftStart: 7, dayOff: 1, platform: 'META', pColor: '#3b82f6' },
   { name: 'Luna', pin: '1472', shiftStart: 7, dayOff: 3, platform: 'META', pColor: '#3b82f6' },
 
@@ -164,6 +164,8 @@ const Badge = ({ status }) => {
 const renderAction = (actionStr) => {
   if (typeof actionStr !== 'string') return actionStr;
 
+  if (actionStr === 'Manager Override') return <span style={{ color: '#c084fc', fontWeight: 600 }}>🔓 Override Granted</span>;
+
   if (actionStr.startsWith('clockIn')) {
     const match = actionStr.match(/\[(.*?)\]/);
     const tag = match ? ` [${match[1]}]` : '';
@@ -211,6 +213,7 @@ export default function AttendanceApp() {
   const [overriddenAgents, setOverriddenAgents] = useState({});
   const [overridePass, setOverridePass] = useState('');
   const [overrideError, setOverrideError] = useState('');
+  const [isCheckingCloud, setIsCheckingCloud] = useState(false);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -371,6 +374,37 @@ export default function AttendanceApp() {
     setTimeout(() => setSuccess(''), 6000); 
   };
 
+  // ── WFH Cloud Override Function ──
+  const checkCloudOverride = async () => {
+    if (!selected) return;
+    setIsCheckingCloud(true);
+    setOverrideError('');
+    
+    try {
+      const response = await fetch(SHEETS_WEBHOOK);
+      const data = await response.json();
+      const todayStr = fmtDate(Date.now());
+      
+      // Look for an 'Override' log for this agent today
+      const hasOverride = data.some(log => 
+        log.agent === selected && 
+        log.action === 'Manager Override' && 
+        log.date === todayStr
+      );
+
+      if (hasOverride) {
+        setOverriddenAgents(p => ({ ...p, [selected]: true }));
+        setSuccess('✅ Cloud authorization found! You may now clock in.');
+      } else {
+        setOverrideError('No authorization found yet. Please ask your manager to approve.');
+      }
+    } catch (e) {
+      setOverrideError('Network error checking authorization. Try again.');
+    }
+    
+    setIsCheckingCloud(false);
+  };
+
   const handleMgrLogin = () => {
     const mgr = MANAGERS.find((m) => m.password === mgrInput.trim());
     if (!mgr) {
@@ -394,7 +428,6 @@ export default function AttendanceApp() {
   const bLeft = breakLeft(curRec);
   const bUsed = breakUsed(curRec);
 
-  // ── Determine if Day Off Override is Needed ──
   const selectedAgent = AGENTS.find((a) => a.name === selected);
   const isDayOff = selectedAgent ? new Date(now).getDay() === selectedAgent.dayOff : false;
   const needsOverride = isDayOff && curStatus === 'idle' && !overriddenAgents[selected];
@@ -673,6 +706,7 @@ export default function AttendanceApp() {
               setError('');
             }}
             placeholder="· · · ·"
+            disabled={needsOverride}
             style={{
               ...inputBase,
               width: '100%',
@@ -681,31 +715,17 @@ export default function AttendanceApp() {
               letterSpacing: 10,
               textAlign: 'center',
               border: `1px solid ${error ? '#f87171' : '#30363d'}`,
+              opacity: needsOverride ? 0.4 : 1
             }}
           />
 
           {error && (
-            <div
-              style={{
-                color: '#f87171',
-                fontSize: 12,
-                marginBottom: 14,
-                textAlign: 'center',
-              }}
-            >
+            <div style={{ color: '#f87171', fontSize: 12, marginBottom: 14, textAlign: 'center' }}>
               {error}
             </div>
           )}
           {success && (
-            <div
-              style={{
-                color: '#4ade80',
-                fontSize: 13,
-                marginBottom: 14,
-                textAlign: 'center',
-              }}
-              className="fade-in"
-            >
+            <div className="fade-in" style={{ color: '#4ade80', fontSize: 13, marginBottom: 14, textAlign: 'center' }}>
               {success}
             </div>
           )}
@@ -726,9 +746,31 @@ export default function AttendanceApp() {
                 🔒 SCHEDULED DAY OFF
               </div>
               <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 18, lineHeight: 1.4 }}>
-                This action requires manager authorization to proceed.
+                If you have requested OT, wait for manager approval and click Check Cloud below.
               </div>
               
+              {/* For the WFH Agent */}
+              <button
+                className="btn"
+                onClick={checkCloudOverride}
+                disabled={isCheckingCloud}
+                style={{ 
+                  width: '100%', 
+                  padding: '12px', 
+                  borderRadius: 6, 
+                  background: '#21262d', 
+                  color: '#e6edf3', 
+                  fontSize: 12, 
+                  marginBottom: 16, 
+                  border: '1px solid #30363d' 
+                }}
+              >
+                {isCheckingCloud ? '↻ CHECKING CLOUD...' : '☁️ CHECK CLOUD FOR APPROVAL'}
+              </button>
+
+              <div style={{ fontSize: 10, color: '#484f58', marginBottom: 16, letterSpacing: 1 }}>— OR AUTHORIZE DIRECTLY (MANAGERS ONLY) —</div>
+              
+              {/* For the Manager */}
               <input
                 type="password"
                 value={overridePass}
@@ -741,7 +783,17 @@ export default function AttendanceApp() {
                       setOverriddenAgents(p => ({ ...p, [selected]: true }));
                       setOverridePass('');
                       setOverrideError('');
-                      setSuccess(`✅ Override granted by ${mgr.name}`);
+                      setSuccess(`✅ Override granted by ${mgr.name} and synced to cloud.`);
+                      
+                      const ts = Date.now();
+                      logToSheets({
+                        date: fmtDate(ts),
+                        time: fmt(ts),
+                        action: 'Manager Override',
+                        agent: selected,
+                        device: `Authorized by: ${mgr.name}`,
+                        timestamp: ts,
+                      });
                     } else {
                       setOverrideError('Incorrect manager password.');
                     }
@@ -760,14 +812,24 @@ export default function AttendanceApp() {
                     setOverriddenAgents(p => ({ ...p, [selected]: true }));
                     setOverridePass('');
                     setOverrideError('');
-                    setSuccess(`✅ Override granted by ${mgr.name}`);
+                    setSuccess(`✅ Override granted by ${mgr.name} and synced to cloud.`);
+                    
+                    const ts = Date.now();
+                    logToSheets({
+                      date: fmtDate(ts),
+                      time: fmt(ts),
+                      action: 'Manager Override',
+                      agent: selected,
+                      device: `Authorized by: ${mgr.name}`,
+                      timestamp: ts,
+                    });
                   } else {
                     setOverrideError('Incorrect manager password.');
                   }
                 }}
                 style={{ width: '100%', padding: '12px', borderRadius: 6, background: '#7e22ce', color: '#fff', fontSize: 12 }}
               >
-                AUTHORIZE CLOCK IN
+                AUTHORIZE SHIFT & SYNC TO CLOUD
               </button>
             </div>
           ) : (
