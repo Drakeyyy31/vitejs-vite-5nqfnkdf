@@ -98,6 +98,7 @@ export default function AttendanceApp() {
   const [mgrName, setMgrName] = useState('');
   const [mgrRole, setMgrRole] = useState('');
   const [mgrInput, setMgrInput] = useState('');
+  const [mgrAuthed, setMgrAuthed] = useState(false);
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -237,9 +238,11 @@ export default function AttendanceApp() {
     setView('agentPortal');
   };
 
+  // ── FIX: Manager Authentication and Logout ──
   const handleMgrAuth = () => {
     const mgr = MANAGERS.find(m => m.password === mgrInput.trim());
     if (mgr) { 
+        setMgrAuthed(true); // Automatically flag manager as authorized
         setMgrName(mgr.name); 
         setMgrRole(mgr.role); 
         setError(''); 
@@ -253,10 +256,17 @@ export default function AttendanceApp() {
 
   const logout = () => {
     setLoggedInAgent('');
-    setMgrName('');
-    setMgrRole('');
     setSelectedAgentName('');
     setView('landing');
+  };
+
+  const handleMgrLogout = () => {
+    setMgrAuthed(false); 
+    setMgrName(''); 
+    setMgrRole(''); 
+    setMgrInput(''); 
+    setMgrError(''); 
+    setView('landing'); // Route back to landing page on logout
   };
 
   // ── AGENT ACTIONS ──
@@ -406,17 +416,18 @@ export default function AttendanceApp() {
     let otByDate = {};
     let presentDays = {}; 
 
+    // FIX: Using Optional Chaining (?.) to prevent missing data errors
     logsInRange.forEach(l => {
       const dateStr = new Date(l.timestamp).toDateString();
-      if (l.action.startsWith('clockIn')) {
+      if (l.action?.startsWith('clockIn')) {
         if (!presentDays[l.agent]) presentDays[l.agent] = new Set();
         presentDays[l.agent].add(dateStr);
       }
-      if (l.action.includes('LATE')) {
+      if (l.action?.includes('LATE')) {
         if (!latesByDate[dateStr]) latesByDate[dateStr] = [];
         latesByDate[dateStr].push(l.agent);
       }
-      if (l.action.includes('[OT:') || l.action.includes('REST DAY OT')) {
+      if (l.action?.includes('[OT:') || l.action?.includes('REST DAY OT')) {
         const otStr = l.action.match(/\[(.*?)\]/)?.[1] || 'OT';
         if (!otByDate[dateStr]) otByDate[dateStr] = [];
         otByDate[dateStr].push(`${l.agent} (${otStr})`);
@@ -459,11 +470,12 @@ export default function AttendanceApp() {
 
   const exportFinanceCSV = () => {
     const header = "Date,Agent,Platform,Role,Clock In,Clock Out,Net Billable Hours,Status,Notes\n";
-    const rows = globalLogs.filter(l => l.action.startsWith('clockOut')).map(l => {
+    // FIX: Using Optional Chaining (?.) for safe extraction
+    const rows = globalLogs.filter(l => l.action?.startsWith('clockOut')).map(l => {
       const a = AGENTS.find(x => x.name === l.agent);
-      const statusMatch = l.action.match(/\[(.*?)\]/);
+      const statusMatch = l.action?.match(/\[(.*?)\]/);
       const status = statusMatch ? statusMatch[1] : "N/A";
-      return `"${l.date}","${l.agent}","${a?.platform || ''}","${a?.role || ''}","${l.date}","${l.time}","Calc in Sheets","${status}","${l.device.replace(/"/g, '""')}"`;
+      return `"${l.date}","${l.agent}","${a?.platform || ''}","${a?.role || ''}","${l.date}","${l.time}","Calc in Sheets","${status}","${l.device?.replace(/"/g, '""') || ''}"`;
     });
     
     const csvContent = "data:text/csv;charset=utf-8," + header + rows.join("\n");
@@ -504,7 +516,9 @@ export default function AttendanceApp() {
     return <span style={{ background: color+'22', color, border: `1px solid ${color}55`, borderRadius: 6, padding: '3px 12px', fontSize: 11, fontWeight: 700, letterSpacing: 1.2 }}>{label}</span>;
   };
 
+  // FIX: Using Optional Chaining (?.) logic for safe UI rendering
   const renderAction = (str) => {
+    if (!str) return <span style={{ color: '#e6edf3' }}>—</span>;
     if (str === 'Manager Override') return <span style={{ color: '#c084fc', fontWeight: 600 }}>🔓 Override Granted</span>;
     if (str === 'SWAP_DAY_OFF') return <span style={{ color: '#ec4899', fontWeight: 600 }}>🔄 Shift Swap Approved</span>;
     if (str.startsWith('clockIn')) return <span style={{ color: str.includes('LATE') ? '#f87171' : '#4ade80', fontWeight: 600 }}>▶ Clock In {str.match(/\[(.*?)\]/)?.[0] || ''}</span>;
@@ -728,13 +742,13 @@ export default function AttendanceApp() {
             <div className="fade-in" style={{ display: 'grid', gap: 20, gridTemplateColumns: '1fr 1fr' }}>
               
               <div style={{ ...card, padding: 24, position: 'relative' }}>
-                 <button className="btn" onClick={logout} style={{ position: 'absolute', top: 20, right: 20, background: '#21262d', color: '#f87171', borderRadius: 6, padding: '6px 12px', fontSize: 11 }}>🔒 Log Out</button>
+                 <button className="btn" onClick={handleMgrLogout} style={{ position: 'absolute', top: 20, right: 20, background: '#21262d', color: '#f87171', borderRadius: 6, padding: '6px 12px', fontSize: 11 }}>🔒 Log Out</button>
                  <div style={{ fontSize: 10, color: '#8b949e', marginBottom: 4 }}>MANAGER PORTAL</div>
                  <h3 style={{ margin: '0 0 16px 0', color: '#e6edf3', fontSize: 18 }}>{mgrName} <span style={{ fontSize: 12, color: '#58a6ff', fontWeight: 500 }}>({mgrRole})</span></h3>
                  
                  <h4 style={{ color: '#8b949e', fontSize: 12, marginTop: 24, marginBottom: 10, borderBottom: '1px solid #21262d', paddingBottom: 6 }}>🚨 Live Absence Tracker</h4>
                  {(() => {
-                    const present = new Set(globalLogs.filter(l => l.action.startsWith('clockIn') && new Date(l.timestamp).toDateString() === new Date().toDateString()).map(l => l.agent));
+                    const present = new Set(globalLogs.filter(l => l.action?.startsWith('clockIn') && new Date(l.timestamp).toDateString() === new Date().toDateString()).map(l => l.agent));
                     const missing = AGENTS.filter(a => {
                       if (checkIsDayOff(a.name, Date.now())) return false;
                       return Date.now() > new Date().setHours(a.shiftStart, 0, 0, 0) && !present.has(a.name);
@@ -824,7 +838,7 @@ export default function AttendanceApp() {
                           <td style={{ padding: '10px 16px', color: '#e6edf3', fontWeight: 500 }}>{l.agent}</td>
                           <td style={{ padding: '10px 16px', color: '#8b949e', fontSize: 10 }}>{ag?.role || '—'}</td>
                           <td style={{ padding: '10px 16px', whiteSpace: 'nowrap' }}>{renderAction(l.action)}</td>
-                          <td style={{ padding: '10px 16px', color: l.device.startsWith('Note:') ? '#58a6ff' : '#484f58', fontStyle: l.device.startsWith('Note:') ? 'italic' : 'normal', fontSize: 11, maxWidth: 250, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.device}</td>
+                          <td style={{ padding: '10px 16px', color: l.device?.startsWith('Note:') ? '#58a6ff' : '#484f58', fontStyle: l.device?.startsWith('Note:') ? 'italic' : 'normal', fontSize: 11, maxWidth: 250, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.device}</td>
                         </tr>
                       )
                     })}
