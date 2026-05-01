@@ -3,12 +3,11 @@ import { useState, useEffect, useMemo } from 'react';
 // ── SYSTEM CONFIG ──
 const SHEETS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbzodvlY8lLDK3AYtmYpBnDOSjIbwS90FHeDFsc6ssUtxIQZvIrpRm4jydNwZk73LkEA/exec';
 const MANAGER_ACTIVATION_KEY = "AFTERSALES-BOSS-2026"; 
-const BREAK_LIMIT_MS = 60 * 60 * 1000;
 
-// ── UTILS ──
-const fmt = (d) => d ? new Date(d).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }) : '—';
-const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
-const fmtInputDate = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+const fmt = (ts) => ts ? new Date(ts).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
+const fmtISO = (ts) => new Date(ts).toISOString().split('T')[0];
+
 const fmtDur = (ms) => {
   if (!ms || ms < 0) return '0m';
   const m = Math.floor(ms / 60000), h = Math.floor(m / 60);
@@ -16,18 +15,13 @@ const fmtDur = (ms) => {
 };
 
 // ── STYLES ──
-const card = { width: '100%', background: '#161b22', border: '1px solid #30363d', borderRadius: 16, padding: '28px', boxShadow: '0 10px 30px rgba(0,0,0,0.5)' };
-const inputBase = { background: '#0d1117', color: '#e6edf3', border: '1px solid #30363d', borderRadius: 8, padding: '12px 14px', fontFamily: "'DM Mono',monospace", width: '100%', marginBottom: 15 };
-const labelStyle = { fontSize: 10, color: '#8b949e', letterSpacing: 2, display: 'block', marginBottom: 6, fontWeight: 600 };
 const platformColors = { META: '#3b82f6', KANAL: '#eab308', Helpwave: '#f97316', Chargeback: '#f43f5e', DMCA: '#94a3b8', MANAGER: '#a78bfa' };
-const btnStyle = { padding: '14px 24px', borderRadius: 10, border: 'none', fontWeight: '700', fontSize: 13, letterSpacing: 1, cursor: 'pointer', transition: '0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' };
 
 export default function AftersalesApp() {
   const [view, setView] = useState('landing'); 
   const [mgrTab, setMgrTab] = useState('dashboard');
   const [dynamicAgents, setDynamicAgents] = useState([]);
   const [globalLogs, setGlobalLogs] = useState([]);
-  const [records, setRecords] = useState({}); 
   
   const [loggedInUser, setLoggedInUser] = useState(null);
   const [error, setError] = useState('');
@@ -35,11 +29,16 @@ export default function AftersalesApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
 
+  // Form & Filter States
   const [regForm, setRegForm] = useState({ name: '', pin: '', platform: 'META' });
   const [activationKeyInput, setActivationKeyInput] = useState('');
   const [approvalSalary, setApprovalSalary] = useState('');
   const [loginForm, setLoginForm] = useState({ name: '', pin: '' });
-  const [filterDate, setFilterDate] = useState(fmtInputDate(Date.now()));
+  
+  // Reporting States
+  const [reportRange, setReportRange] = useState('today'); // today, yesterday, week, month, custom
+  const [customStart, setCustomStart] = useState(fmtISO(Date.now()));
+  const [customEnd, setCustomEnd] = useState(fmtISO(Date.now()));
 
   const fetchData = async () => {
     setIsLoading(true);
@@ -70,219 +69,255 @@ export default function AftersalesApp() {
     return () => clearInterval(t);
   }, []);
 
-  const userRec = loggedInUser ? (records[loggedInUser.name] || {}) : {};
-  const getStatus = () => {
-    if (!userRec.clockIn) return 'idle';
-    if (userRec.onPause) return 'paused';
-    if (userRec.onBreak) return 'on_break';
-    return 'clocked_in';
+  const filteredLogs = useMemo(() => {
+    let startTs, endTs;
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    if (reportRange === 'today') {
+      startTs = today.getTime();
+      endTs = today.getTime() + 86400000;
+    } else if (reportRange === 'yesterday') {
+      startTs = today.getTime() - 86400000;
+      endTs = today.getTime();
+    } else if (reportRange === 'week') {
+      startTs = today.getTime() - (7 * 86400000);
+      endTs = Date.now();
+    } else if (reportRange === 'month') {
+      startTs = new Date(today.getFullYear(), today.getMonth(), 1).getTime();
+      endTs = Date.now();
+    } else {
+      startTs = new Date(customStart).getTime();
+      endTs = new Date(customEnd).getTime() + 86400000;
+    }
+
+    return globalLogs.filter(l => l.timestamp >= startTs && l.timestamp <= endTs);
+  }, [globalLogs, reportRange, customStart, customEnd]);
+
+  const getClientLocation = async () => {
+    try {
+      const res = await fetch('https://ipapi.co/json/');
+      const data = await res.json();
+      return `${data.city}, ${data.country_code} | IP: ${data.ip}`;
+    } catch (e) { return "Location Hidden"; }
   };
 
   const handleRegister = async () => {
     setError('');
-    if (!regForm.name || regForm.pin.length < 4) return setError("Fill all fields (PIN min 4 chars)");
-    if (dynamicAgents.some(a => a.name.toLowerCase() === regForm.name.toLowerCase().trim())) return setError("User already created.");
+    if (!regForm.name || regForm.pin.length < 4) return setError("Min 4 characters for PIN.");
+    if (dynamicAgents.some(a => a.name.toLowerCase() === regForm.name.toLowerCase().trim())) return setError("User exists.");
     
     setIsLoading(true);
-    const isManagerBypass = regForm.platform === 'MANAGER' && activationKeyInput === MANAGER_ACTIVATION_KEY;
-    
+    const isMgr = regForm.platform === 'MANAGER' && activationKeyInput === MANAGER_ACTIVATION_KEY;
     if (regForm.platform === 'MANAGER' && activationKeyInput !== MANAGER_ACTIVATION_KEY) {
-        setIsLoading(false); return setError("Invalid Activation Key.");
+        setIsLoading(false); return setError("Invalid Manager Key.");
     }
     
-    const finalData = { ...regForm, role: regForm.platform === 'MANAGER' ? 'Manager' : 'Agent', salary: isManagerBypass ? 600 : 0 };
-    const payload = { date: fmtDate(now), time: fmt(now), action: isManagerBypass ? 'USER_APPROVE' : 'USER_REGISTER', agent: regForm.name.trim(), device: JSON.stringify(finalData), timestamp: now };
+    const loc = await getClientLocation();
+    const finalData = { ...regForm, role: isMgr ? 'Manager' : 'Agent', salary: isMgr ? 600 : 0 };
+    const payload = { date: fmtDate(now), time: fmt(now), action: isMgr ? 'USER_APPROVE' : 'USER_REGISTER', agent: regForm.name.trim(), device: JSON.stringify({ ...finalData, loc }), timestamp: now };
     
-    try {
-        await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
-        if (isManagerBypass) {
-            setLoggedInUser({ ...finalData, status: 'active' });
-            setView('mgrPortal');
-        } else {
-            setSuccess("Registration request sent!");
-            setTimeout(() => setView('landing'), 3000);
-        }
-    } catch (e) { setError("Network error."); }
+    await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
+    setSuccess(isMgr ? "Manager Activated!" : "Registration Sent!");
+    if (isMgr) { setLoggedInUser({ ...finalData, status: 'active' }); setView('mgrPortal'); }
+    else { setTimeout(() => setView('landing'), 2000); }
     setIsLoading(false);
   };
 
   const handleAction = async (type) => {
     setIsLoading(true);
-    const ts = Date.now();
-    let next = { ...userRec };
-    if (type === 'clockIn') next = { clockIn: ts, breakUsedMs: 0, pauseUsedMs: 0 };
-    if (type === 'breakStart') next.onBreak = true, next.breakStart = ts;
-    if (type === 'breakEnd') next.onBreak = false, next.breakUsedMs = (next.breakUsedMs || 0) + (ts - next.breakStart);
-    if (type === 'pauseStart') next.onPause = true, next.pauseStart = ts;
-    if (type === 'pauseEnd') next.onPause = false, next.pauseUsedMs = (next.pauseUsedMs || 0) + (ts - next.pauseStart);
-    if (type === 'clockOut') next = {};
-    setRecords({ ...records, [loggedInUser.name]: next });
-    
-    const entry = { date: fmtDate(ts), time: fmt(ts), action: type, agent: loggedInUser.name, device: `Aftersales HUD | ${loggedInUser.platform}`, timestamp: ts };
+    const loc = await getClientLocation();
+    const entry = { date: fmtDate(now), time: fmt(now), action: type, agent: loggedInUser.name, device: `${loc} | ${navigator.platform}`, timestamp: now };
     await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(entry) });
     await fetchData();
     setIsLoading(false);
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: "'DM Mono', monospace", padding: '40px 20px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+    <div className="app-shell">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@800&display=swap');
-        .btn:hover{filter:brightness(1.2);transform:translateY(-1px)}
-        .loading-bar{position:fixed;top:0;left:0;right:0;height:3px;background:#58a6ff;z-index:99;animation:ld 2s infinite}
-        @keyframes ld{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+        :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --blue: #58a6ff; --green: #238636; --red: #f87171; }
+        body { margin: 0; background: var(--bg); color: #e6edf3; font-family: 'DM Mono', monospace; }
+        .app-shell { width: 100vw; min-height: 100vh; padding: clamp(10px, 3vw, 40px); display: flex; flex-direction: column; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { font-family: 'Syne'; font-size: clamp(22px, 5vw, 40px); margin: 0; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 25px; box-shadow: 0 10px 40px rgba(0,0,0,0.5); width: 100%; }
+        .input-box { background: var(--bg); color: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 14px; width: 100%; margin-bottom: 15px; font-size: 14px; }
+        .btn { padding: 14px 20px; border-radius: 10px; border: none; font-weight: 700; cursor: pointer; transition: 0.2s; font-size: 13px; }
+        .btn:hover { filter: brightness(1.2); transform: translateY(-1px); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; width: 100%; }
+        .report-bar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; background: var(--card); padding: 15px; border-radius: 12px; border: 1px solid var(--border); }
+        .table-container { overflow-x: auto; border-radius: 12px; border: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; min-width: 800px; }
+        th { text-align: left; padding: 15px; background: #0d1117; color: #8b949e; border-bottom: 2px solid var(--border); }
+        td { padding: 15px; border-bottom: 1px solid var(--border); font-size: 13px; }
+        .loading { position: fixed; top: 0; left: 0; width: 100%; height: 3px; background: var(--blue); z-index: 1000; animation: lds 1.5s infinite; }
+        @keyframes lds { 0% { left: -100%; } 100% { left: 100%; } }
       `}</style>
 
-      {isLoading && <div className="loading-bar" />}
+      {isLoading && <div className="loading" />}
 
-      <div style={{ textAlign: 'center', marginBottom: 40 }}>
-        <h1 style={{ fontFamily: 'Syne', fontSize: 32, margin: 0, letterSpacing: -1 }}>AFTERSALES <span style={{ color: '#58a6ff' }}>WORKSPACE</span></h1>
-        <div style={{ fontSize: 12, color: '#8b949e', marginTop: 10 }}>{new Date(now).toLocaleTimeString('en-PH')}</div>
+      <div className="header">
+        <h1>AFTERSALES <span style={{ color: 'var(--blue)' }}>WORKSPACE</span></h1>
+        <div style={{ color: '#8b949e', marginTop: '10px', fontSize: '14px' }}>{new Date(now).toLocaleString('en-PH')}</div>
       </div>
 
       {view === 'landing' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 15, width: 320 }}>
-          <button className="btn" onClick={() => setView('login')} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>SIGN IN</button>
-          <button className="btn" onClick={() => setView('register')} style={{ ...btnStyle, background: '#1f6feb', color: '#fff' }}>CREATE ACCOUNT</button>
+        <div style={{ maxWidth: '400px', margin: 'auto', display: 'flex', flexDirection: 'column', gap: '15px', width: '100%' }}>
+          <button className="btn" style={{ background: 'var(--green)', color: '#fff' }} onClick={() => setView('login')}>SIGN IN</button>
+          <button className="btn" style={{ background: 'var(--blue)', color: '#fff' }} onClick={() => setView('register')}>CREATE ACCOUNT</button>
         </div>
       )}
 
       {view === 'register' && (
-        <div style={card}>
-          <h2 style={{ fontFamily: 'Syne', marginTop: 0 }}>Onboarding</h2>
-          <input placeholder="Username" style={inputBase} onChange={e => setRegForm({...regForm, name: e.target.value})} />
-          <input placeholder="Password" type="password" style={inputBase} onChange={e => setRegForm({...regForm, pin: e.target.value})} />
-          <label style={labelStyle}>DEPARTMENT</label>
-          <select style={inputBase} onChange={e => setRegForm({...regForm, platform: e.target.value})}>
+        <div className="card" style={{ maxWidth: '600px', margin: 'auto' }}>
+          <h2 style={{ fontFamily: 'Syne', marginTop: 0 }}>Portal Onboarding</h2>
+          <input className="input-box" placeholder="Username" onChange={e => setRegForm({...regForm, name: e.target.value})} />
+          <input className="input-box" placeholder="Password" type="password" onChange={e => setRegForm({...regForm, pin: e.target.value})} />
+          <select className="input-box" onChange={e => setRegForm({...regForm, platform: e.target.value})}>
             {Object.keys(platformColors).map(p => <option key={p} value={p}>{p}</option>)}
           </select>
-          {regForm.platform === 'MANAGER' && <input type="password" placeholder="Activation Key" style={inputBase} onChange={e => setActivationKeyInput(e.target.value)} />}
-          <button className="btn" onClick={handleRegister} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>SUBMIT REQUEST</button>
-          <button className="btn" onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', color: '#8b949e', border: 'none', marginTop: 10 }}>Cancel</button>
+          {regForm.platform === 'MANAGER' && <input className="input-box" type="password" placeholder="Manager Key" onChange={e => setActivationKeyInput(e.target.value)} />}
+          <button className="btn" style={{ width: '100%', background: 'var(--green)', color: '#fff' }} onClick={handleRegister}>SUBMIT REQUEST</button>
+          <button className="btn" style={{ width: '100%', background: 'transparent', color: '#8b949e' }} onClick={() => setView('landing')}>Cancel</button>
+          {error && <p style={{ color: 'var(--red)', textAlign: 'center' }}>{error}</p>}
         </div>
       )}
 
       {view === 'login' && (
-        <div style={card}>
-          <h2 style={{ fontFamily: 'Syne', marginTop: 0 }}>Secure Login</h2>
-          <input placeholder="Username" style={inputBase} onChange={e => setLoginForm({...loginForm, name: e.target.value})} />
-          <input placeholder="Password" type="password" style={inputBase} onChange={e => setLoginForm({...loginForm, pin: e.target.value})} />
-          <button className="btn" onClick={() => {
+        <div className="card" style={{ maxWidth: '500px', margin: 'auto' }}>
+          <h2 style={{ fontFamily: 'Syne', marginTop: 0 }}>Login</h2>
+          <input className="input-box" placeholder="Username" onChange={e => setLoginForm({...loginForm, name: e.target.value})} />
+          <input className="input-box" placeholder="Password" type="password" onChange={e => setLoginForm({...loginForm, pin: e.target.value})} />
+          <button className="btn" style={{ width: '100%', background: 'var(--green)', color: '#fff' }} onClick={() => {
             const user = dynamicAgents.find(a => a.name.toLowerCase() === loginForm.name.toLowerCase().trim() && a.pin === loginForm.pin);
             if (!user) return setError("Invalid credentials.");
             if (user.status === 'pending') return setError("Approval pending.");
             setLoggedInUser(user); setView(user.role === 'Manager' ? 'mgrPortal' : 'agentPortal');
-          }} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>ENTER WORKSPACE</button>
-          <button className="btn" onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', color: '#8b949e', border: 'none', marginTop: 10 }}>Back</button>
-          {error && <p style={{ color: '#f87171', textAlign: 'center', fontSize: 12 }}>{error}</p>}
+          }}>ACCESS WORKSPACE</button>
+          <button className="btn" style={{ width: '100%', background: 'transparent', color: '#8b949e' }} onClick={() => setView('landing')}>Back</button>
         </div>
       )}
 
-      {/* ── AGENT PORTAL ── */}
       {view === 'agentPortal' && loggedInUser && (
-        <div style={{ width: '100%', maxWidth: 500 }}>
-          <div style={card}>
-            <h3 style={{ margin: 0, fontFamily: 'Syne' }}>{loggedInUser.name}</h3>
-            <span style={{ color: platformColors[loggedInUser.platform], fontSize: 11, fontWeight: 700 }}>{loggedInUser.platform} DEPARTMENT</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 25 }}>
-               <button className="btn" onClick={() => handleAction('clockIn')} style={{ gridColumn: '1/-1', ...btnStyle, background: '#238636', color: '#fff' }}>▶ START SHIFT</button>
-               <button className="btn" onClick={() => handleAction('clockOut')} style={{ gridColumn: '1/-1', ...btnStyle, background: '#6e40c9', color: '#fff' }}>⏹ END SHIFT</button>
+        <div className="grid">
+          <div className="card">
+            <h2 style={{ fontFamily: 'Syne', color: 'var(--blue)' }}>{loggedInUser.name}</h2>
+            <p>Department: <span style={{ color: platformColors[loggedInUser.platform], fontWeight: 'bold' }}>{loggedInUser.platform}</span></p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <button className="btn" style={{ background: 'var(--green)', color: '#fff' }} onClick={() => handleAction('clockIn')}>CLOCK IN</button>
+              <button className="btn" style={{ background: '#6e40c9', color: '#fff' }} onClick={() => handleAction('clockOut')}>CLOCK OUT</button>
             </div>
+            <button className="btn" style={{ width: '100%', marginTop: '30px', background: 'transparent', color: 'var(--red)' }} onClick={() => { setLoggedInUser(null); setView('landing'); }}>LOGOUT</button>
           </div>
-          <button className="btn" onClick={() => { setLoggedInUser(null); setView('landing'); }} style={{ width: '100%', background: 'transparent', border: 'none', color: '#f87171', marginTop: 25 }}>Logout</button>
-        </div>
-      )}
-
-      {/* ── MANAGER COMMAND CENTER ── */}
-      {view === 'mgrPortal' && loggedInUser && (
-        <div style={{ width: '100%', maxWidth: 1100 }}>
-          <div style={{ display: 'flex', gap: 10, marginBottom: 25 }}>
-             {['dashboard', 'directory', 'onboarding', 'logs'].map(t => (
-               <button key={t} className="btn" onClick={() => setMgrTab(t)} style={{ ...btnStyle, flex: 1, background: mgrTab === t ? '#1f6feb' : '#161b22', border: '1px solid #30363d', color: '#fff', textTransform: 'uppercase', fontSize: 10 }}>{t}</button>
+          <div className="card">
+             <h3 style={{ fontFamily: 'Syne' }}>Your Recent Activity</h3>
+             {globalLogs.filter(l => l.agent === loggedInUser.name).slice(0, 10).map((l, i) => (
+                <div key={i} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)', fontSize: '13px' }}>
+                   {l.date} | {l.time} - <span style={{ fontWeight: 'bold' }}>{l.action}</span>
+                </div>
              ))}
           </div>
+        </div>
+      )}
 
-          {mgrTab === 'dashboard' && (
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-               <div style={card}>
-                  <h3 style={{ fontFamily: 'Syne', marginTop: 0 }}>🚨 Live Status</h3>
-                  {dynamicAgents.filter(a => a.status === 'active' && a.role === 'Agent').map(a => {
-                    const log = globalLogs.find(l => l.agent === a.name);
-                    const isPresent = log?.action === 'clockIn' && log.date === fmtDate(now);
-                    return (
-                      <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid #21262d' }}>
-                         <span>{a.name}</span>
-                         <span style={{ color: isPresent ? '#22c55e' : '#f87171', fontWeight: 700, fontSize: 11 }}>{isPresent ? 'ACTIVE' : 'ABSENT'}</span>
-                      </div>
-                    )
-                  })}
-               </div>
-               <div style={card}>
-                  <h3 style={{ fontFamily: 'Syne', marginTop: 0 }}>📊 Financial Summary</h3>
-                  <div style={{ background: '#0d1117', padding: 20, borderRadius: 12, border: '1px solid #238636' }}>
-                     <div style={labelStyle}>EST. DAILY BURN</div>
-                     <div style={{ fontSize: 32, fontWeight: 800, color: '#238636' }}>${(dynamicAgents.reduce((sum, a) => sum + (a.salary || 0), 0) / 30).toFixed(2)}<span style={{ fontSize: 12 }}> USD</span></div>
-                  </div>
-                  <button className="btn" onClick={() => {
-                    const header = "Date,Agent,Platform,Monthly,Daily Rate\n";
-                    const rows = dynamicAgents.map(a => `"${fmtDate(now)}","${a.name}","${a.platform}","$${a.salary}","$${(a.salary/30).toFixed(2)}"`).join("\n");
-                    const link = document.createElement("a"); link.href = 'data:text/csv;charset=utf-8,' + encodeURI(header+rows);
-                    link.download = `Payroll_Export.csv`; link.click();
-                  }} style={{ ...btnStyle, width: '100%', background: '#1d4ed8', color: '#fff', marginTop: 20 }}>📥 FULL PAYROLL EXPORT</button>
-               </div>
-            </div>
-          )}
+      {view === 'mgrPortal' && loggedInUser && (
+        <div style={{ width: '100%' }}>
+          <div className="report-bar">
+            {['dashboard', 'onboarding', 'logs'].map(t => (
+              <button key={t} className="btn" onClick={() => setMgrTab(t)} style={{ background: mgrTab === t ? 'var(--blue)' : 'var(--bg)', color: '#fff' }}>{t.toUpperCase()}</button>
+            ))}
+          </div>
 
-          {mgrTab === 'directory' && (
-            <div style={card}>
-              <h3 style={{ fontFamily: 'Syne', marginTop: 0 }}>Member Directory & Salaries</h3>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                  <thead style={{ background: '#0d1117', color: '#8b949e' }}>
+          {mgrTab === 'logs' && (
+            <div className="card">
+              <div style={{ marginBottom: '20px' }}>
+                <h3 style={{ fontFamily: 'Syne', margin: 0 }}>Intelligence Reporting Hub</h3>
+                <p style={{ color: '#8b949e', fontSize: '12px' }}>Comprehensive audit trail with location proof.</p>
+              </div>
+
+              <div className="report-bar">
+                {['today', 'yesterday', 'week', 'month', 'custom'].map(r => (
+                  <button key={r} className="btn" onClick={() => setReportRange(r)} style={{ fontSize: '11px', background: reportRange === r ? 'var(--blue)' : 'var(--bg)', color: '#fff' }}>{r.toUpperCase()}</button>
+                ))}
+              </div>
+
+              {reportRange === 'custom' && (
+                <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+                  <input className="input-box" type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} />
+                  <input className="input-box" type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} />
+                </div>
+              )}
+
+              <div className="table-container">
+                <table>
+                  <thead>
                     <tr>
-                      <th style={{ padding: 12, textAlign: 'left' }}>NAME</th>
-                      <th style={{ padding: 12, textAlign: 'left' }}>DEPT</th>
-                      <th style={{ padding: 12, textAlign: 'left' }}>ROLE</th>
-                      <th style={{ padding: 12, textAlign: 'left' }}>MONTHLY</th>
-                      <th style={{ padding: 12, textAlign: 'left' }}>DAILY</th>
+                      <th>Date</th>
+                      <th>Time</th>
+                      <th>Agent</th>
+                      <th>Action</th>
+                      <th>Proof (Location/Device)</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {dynamicAgents.filter(a => a.status === 'active').map(a => (
-                      <tr key={a.name} style={{ borderBottom: '1px solid #21262d' }}>
-                        <td style={{ padding: 12, fontWeight: 700 }}>{a.name}</td>
-                        <td style={{ padding: 12, color: platformColors[a.platform] }}>{a.platform}</td>
-                        <td style={{ padding: 12 }}>{a.role}</td>
-                        <td style={{ padding: 12, color: '#22c55e' }}>${a.salary || 0}</td>
-                        <td style={{ padding: 12, color: '#58a6ff' }}>${((a.salary || 0)/30).toFixed(2)}</td>
+                    {filteredLogs.map((l, i) => (
+                      <tr key={i}>
+                        <td>{l.date}</td>
+                        <td style={{ color: 'var(--blue)' }}>{l.time}</td>
+                        <td style={{ fontWeight: '700' }}>{l.agent}</td>
+                        <td>{l.action}</td>
+                        <td style={{ fontSize: '11px', color: '#8b949e' }}>{l.device}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                {filteredLogs.length === 0 && <p style={{ textAlign: 'center', padding: '20px' }}>No records found for this period.</p>}
               </div>
             </div>
           )}
 
-          {mgrTab === 'onboarding' && (
-             <div style={card}>
-                <h3 style={{ fontFamily: 'Syne', marginTop: 0 }}>Pending Approvals</h3>
-                <input placeholder="Set Monthly Salary (USD)" type="number" style={inputBase} onChange={e => setApprovalSalary(e.target.value)} />
-                {dynamicAgents.filter(a => a.status === 'pending').map(a => (
-                  <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '15px 0', borderBottom: '1px solid #30363d' }}>
-                     <span>{a.name} ({a.platform})</span>
-                     <button className="btn" onClick={async () => {
-                        if(!approvalSalary) return alert("Set salary!");
-                        setIsLoading(true);
-                        const payload = { date: fmtDate(now), time: fmt(now), action: 'USER_APPROVE', agent: a.name, device: JSON.stringify({ ...a, salary: Number(approvalSalary) }), timestamp: now };
-                        await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
-                        await fetchData();
-                     }} style={{ ...btnStyle, background: '#238636', color: '#fff', padding: '6px 15px' }}>ACTIVATE</button>
+          {mgrTab === 'dashboard' && (
+            <div className="grid">
+               <div className="card">
+                  <h3 style={{ fontFamily: 'Syne' }}>Payroll Summary</h3>
+                  <div style={{ fontSize: '36px', fontWeight: '800', color: 'var(--green)' }}>
+                    ${(dynamicAgents.reduce((s, a) => s + (a.salary || 0), 0) / 30).toFixed(2)}
                   </div>
-                ))}
-             </div>
+                  <p style={{ color: '#8b949e' }}>Estimated Daily Operations Cost (USD)</p>
+               </div>
+               <div className="card">
+                  <h3 style={{ fontFamily: 'Syne' }}>Staff Directory</h3>
+                  {dynamicAgents.filter(a => a.status === 'active').map(a => (
+                    <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+                       <span>{a.name}</span>
+                       <span style={{ fontWeight: 'bold', color: platformColors[a.platform] }}>{a.platform}</span>
+                    </div>
+                  ))}
+               </div>
+            </div>
           )}
 
-          <button className="btn" onClick={() => { setLoggedInUser(null); setView('landing'); }} style={{ width: '100%', background: 'transparent', border: 'none', color: '#f87171', marginTop: 25 }}>Close Workspace</button>
+          {mgrTab === 'onboarding' && (
+            <div className="card">
+               <h3 style={{ fontFamily: 'Syne' }}>Approval Requests</h3>
+               <input className="input-box" placeholder="Set Monthly Base Salary (USD)" type="number" onChange={e => setApprovalSalary(e.target.value)} />
+               {dynamicAgents.filter(a => a.status === 'pending').map(a => (
+                 <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', padding: '15px 0', borderBottom: '1px solid var(--border)', alignItems: 'center' }}>
+                    <span>{a.name} ({a.platform})</span>
+                    <button className="btn btn-green" onClick={async () => {
+                       if(!approvalSalary) return alert("Assign salary.");
+                       const payload = { date: fmtDate(now), time: fmt(now), action: 'USER_APPROVE', agent: a.name, device: JSON.stringify({ ...a, salary: Number(approvalSalary) }), timestamp: now };
+                       await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
+                       await fetchData();
+                    }}>APPROVE & ACTIVATE</button>
+                 </div>
+               ))}
+            </div>
+          )}
+          
+          <button className="btn" style={{ width: '100%', marginTop: '30px', background: 'transparent', color: 'var(--red)' }} onClick={() => { setLoggedInUser(null); setView('landing'); }}>CLOSE WORKSPACE</button>
         </div>
       )}
     </div>
