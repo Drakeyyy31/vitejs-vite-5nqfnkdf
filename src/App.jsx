@@ -2,44 +2,49 @@ import { useState, useEffect } from 'react';
 
 // Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6
 const AGENTS = [
+  // ── 9am-5pm ──
+  { name: 'Eli', pin: '2674', shiftStart: 9, dayOff: 0, platform: 'DMCA', pColor: '#964b00' }, // Brown
+  { name: 'Mary', pin: '5819', shiftStart: 9, dayOff: 6, platform: 'Chargeback', pColor: '#f43f5e' }, // Rose
+  { name: 'Robert', pin: '7342', shiftStart: 9, dayOff: 5, platform: 'Chargeback', pColor: '#f43f5e' }, // Rose
+
   // ── 7am-3pm ──
-  { name: 'Jon', pin: '8495', shiftStart: 7, dayOff: 0 },
-  { name: 'Porsha', pin: '6148', shiftStart: 7, dayOff: 6 },
-  { name: 'Hawuki', pin: '9507', shiftStart: 7, dayOff: 1 },
-  { name: 'Chris', pin: '5834', shiftStart: 7, dayOff: 5 },
-  { name: 'Icho', pin: '1537', shiftStart: 7, dayOff: 3 },
-  { name: 'Chin', pin: '3256', shiftStart: 7, dayOff: 4 },
-  { name: 'Marc', pin: '8364', shiftStart: 7, dayOff: 2 },
-  { name: 'Art', pin: '9031', shiftStart: 7, dayOff: 2 },
-  { name: 'Charles', pin: '8237', shiftStart: 7, dayOff: 1 },
-  { name: 'Luna', pin: '1472', shiftStart: 7, dayOff: 3 },
+  { name: 'Jon', pin: '8495', shiftStart: 7, dayOff: 0, platform: 'KANAL', pColor: '#eab308' }, // Yellow
+  { name: 'Porsha', pin: '6148', shiftStart: 7, dayOff: 6, platform: 'KANAL / Trustpilot', pColor: '#22c55e' }, // Green
+  { name: 'Hawuki', pin: '9507', shiftStart: 7, dayOff: 1, platform: 'Helpwave', pColor: '#f97316' }, // Orange
+  { name: 'Chris', pin: '5834', shiftStart: 7, dayOff: 5, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Icho', pin: '1537', shiftStart: 7, dayOff: 3, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Chin', pin: '3256', shiftStart: 7, dayOff: 4, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Marc', pin: '8364', shiftStart: 7, dayOff: 2, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Art', pin: '9031', shiftStart: 7, dayOff: 2, platform: 'META', pColor: '#3b82f6' }, // Blue
+  { name: 'Charles', pin: '8237', shiftStart: 7, dayOff: 1, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Luna', pin: '1472', shiftStart: 7, dayOff: 3, platform: 'META', pColor: '#3b82f6' },
 
   // ── 3pm-11pm ──
-  { name: 'Giah', pin: '4587', shiftStart: 15, dayOff: 4 },
-  { name: 'Bulad', pin: '5682', shiftStart: 15, dayOff: 5 },
-  { name: 'Trellix', pin: '8609', shiftStart: 15, dayOff: 0 },
-  { name: 'Aljane', pin: '4863', shiftStart: 15, dayOff: 2 },
-  { name: 'Koko', pin: '3726', shiftStart: 15, dayOff: 2 },
-  { name: 'Aruchi', pin: '3485', shiftStart: 15, dayOff: 1 },
-  { name: 'Seyan', pin: '5091', shiftStart: 15, dayOff: 4 },
-  { name: 'John', pin: '2893', shiftStart: 15, dayOff: 5 },
-  { name: 'Kisses', pin: '7241', shiftStart: 15, dayOff: 2 },
-  { name: 'Dani', pin: '4015', shiftStart: 15, dayOff: 0 },
-  { name: 'Ryujo', pin: '9740', shiftStart: 15, dayOff: 1 },
-  { name: 'Jiro', pin: '7483', shiftStart: 15, dayOff: 6 },
+  { name: 'Giah', pin: '4587', shiftStart: 15, dayOff: 4, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Bulad', pin: '5682', shiftStart: 15, dayOff: 5, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Trellix', pin: '8609', shiftStart: 15, dayOff: 0, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Aljane', pin: '4863', shiftStart: 15, dayOff: 2, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Koko', pin: '3726', shiftStart: 15, dayOff: 2, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'Aruchi', pin: '3485', shiftStart: 15, dayOff: 1, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'Seyan', pin: '5091', shiftStart: 15, dayOff: 4, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'John', pin: '2893', shiftStart: 15, dayOff: 5, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Kisses', pin: '7241', shiftStart: 15, dayOff: 2, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Dani', pin: '4015', shiftStart: 15, dayOff: 0, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Ryujo', pin: '9740', shiftStart: 15, dayOff: 1, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Jiro', pin: '7483', shiftStart: 15, dayOff: 6, platform: 'Helpwave', pColor: '#f97316' },
 
   // ── 11pm-7am ──
-  { name: 'Eunice', pin: '4361', shiftStart: 23, dayOff: 2 },
-  { name: 'Kemuel', pin: '6892', shiftStart: 23, dayOff: 3 },
-  { name: 'Daniel', pin: '6325', shiftStart: 23, dayOff: 5 },
-  { name: 'Juliana', pin: '3958', shiftStart: 23, dayOff: 6 },
-  { name: 'Venellope', pin: '2748', shiftStart: 23, dayOff: 5 },
-  { name: 'Pea', pin: '9163', shiftStart: 23, dayOff: 3 },
-  { name: 'Lanie', pin: '1954', shiftStart: 23, dayOff: 0 },
-  { name: 'Gio', pin: '1263', shiftStart: 23, dayOff: 0 },
-  { name: 'Kate', pin: '2167', shiftStart: 23, dayOff: 5 },
-  { name: 'Juan', pin: '7014', shiftStart: 23, dayOff: 6 },
-  { name: 'Kat', pin: '6720', shiftStart: 23, dayOff: 2 }
+  { name: 'Eunice', pin: '4361', shiftStart: 23, dayOff: 2, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Kemuel', pin: '6892', shiftStart: 23, dayOff: 3, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Daniel', pin: '6325', shiftStart: 23, dayOff: 5, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Juliana', pin: '3958', shiftStart: 23, dayOff: 6, platform: 'Helpwave', pColor: '#f97316' },
+  { name: 'Venellope', pin: '2748', shiftStart: 23, dayOff: 5, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'Pea', pin: '9163', shiftStart: 23, dayOff: 3, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'Lanie', pin: '1954', shiftStart: 23, dayOff: 0, platform: 'KANAL', pColor: '#eab308' },
+  { name: 'Gio', pin: '1263', shiftStart: 23, dayOff: 0, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Kate', pin: '2167', shiftStart: 23, dayOff: 5, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Juan', pin: '7014', shiftStart: 23, dayOff: 6, platform: 'META', pColor: '#3b82f6' },
+  { name: 'Kat', pin: '6720', shiftStart: 23, dayOff: 2, platform: 'META', pColor: '#3b82f6' }
 ];
 
 const MANAGERS = [
@@ -133,6 +138,7 @@ const Badge = ({ status }) => {
     clocked_in: ['#22c55e', 'CLOCKED IN'],
     on_break: ['#f59e0b', 'ON BREAK'],
     clocked_out: ['#3b82f6', 'CLOCKED OUT'],
+    day_off: ['#a78bfa', 'DAY OFF'],
   };
   const [color, label] = map[status] || map.idle;
   return (
@@ -194,11 +200,17 @@ export default function AttendanceApp() {
   const [globalLogs, setGlobalLogs] = useState([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
+  // Manager auth state for PIN sheet
   const [mgrAuthed, setMgrAuthed] = useState(false);
   const [mgrInput, setMgrInput] = useState('');
   const [mgrError, setMgrError] = useState('');
   const [mgrName, setMgrName] = useState('');
   const [showMgrPass, setShowMgrPass] = useState(false);
+
+  // Manager override state for Day Off clock-ins
+  const [overriddenAgents, setOverriddenAgents] = useState({});
+  const [overridePass, setOverridePass] = useState('');
+  const [overrideError, setOverrideError] = useState('');
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -278,7 +290,7 @@ export default function AttendanceApp() {
     const ts = Date.now();
     const today = new Date().toDateString();
     let next = { ...rec };
-    let logActionStr = action; // Default for Sheets log
+    let logActionStr = action;
 
     if (action === 'clockIn') {
       if (rec.date && rec.date !== today) {
@@ -346,7 +358,7 @@ export default function AttendanceApp() {
     const entry = {
       date: fmtDate(ts),
       time: fmt(ts),
-      action: logActionStr, // This goes to Sheets exactly as 'clockIn [LATE]', etc.
+      action: logActionStr,
       agent: agent.name,
       device: navigator.userAgent.slice(0, 100),
       timestamp: ts,
@@ -356,7 +368,7 @@ export default function AttendanceApp() {
     save({ ...records, [agent.name]: next });
     await logToSheets(entry);
     setPin('');
-    setTimeout(() => setSuccess(''), 6000); // Extended slightly so they can read the tag
+    setTimeout(() => setSuccess(''), 6000); 
   };
 
   const handleMgrLogin = () => {
@@ -381,6 +393,12 @@ export default function AttendanceApp() {
   const curStatus = getStatus(curRec);
   const bLeft = breakLeft(curRec);
   const bUsed = breakUsed(curRec);
+
+  // ── Determine if Day Off Override is Needed ──
+  const selectedAgent = AGENTS.find((a) => a.name === selected);
+  const isDayOff = selectedAgent ? new Date(now).getDay() === selectedAgent.dayOff : false;
+  const needsOverride = isDayOff && curStatus === 'idle' && !overriddenAgents[selected];
+  const displayStatus = needsOverride ? 'day_off' : curStatus;
 
   const allLogs = globalLogs
     .filter((l) => {
@@ -528,6 +546,8 @@ export default function AttendanceApp() {
               setPin('');
               setError('');
               setSuccess('');
+              setOverridePass('');
+              setOverrideError('');
             }}
             style={{
               ...inputBase,
@@ -552,20 +572,49 @@ export default function AttendanceApp() {
                 borderRadius: 8,
                 padding: '12px 14px',
                 marginBottom: 18,
-                border: '1px solid #21262d',
+                border: `1px solid ${needsOverride ? '#a78bfa' : '#21262d'}`,
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
+                transition: 'border 0.3s ease'
               }}
             >
-              <div>
-                <div
-                  style={{ fontSize: 10, color: '#8b949e', marginBottom: 5 }}
-                >
-                  STATUS
+              <div style={{ display: 'flex', gap: 24 }}>
+                <div>
+                  <div
+                    style={{ fontSize: 10, color: '#8b949e', marginBottom: 5 }}
+                  >
+                    STATUS
+                  </div>
+                  <Badge status={displayStatus} />
                 </div>
-                <Badge status={curStatus} />
+                {selectedAgent?.platform && (
+                  <div>
+                    <div
+                      style={{ fontSize: 10, color: '#8b949e', marginBottom: 5 }}
+                    >
+                      PLATFORM
+                    </div>
+                    <span
+                      style={{
+                        background: selectedAgent.pColor + '22',
+                        color: selectedAgent.pColor,
+                        border: `1px solid ${selectedAgent.pColor}55`,
+                        borderRadius: 6,
+                        padding: '3px 12px',
+                        fontSize: 11,
+                        fontWeight: 700,
+                        letterSpacing: 1.2,
+                        fontFamily: 'monospace',
+                        display: 'inline-block'
+                      }}
+                    >
+                      {selectedAgent.platform.toUpperCase()}
+                    </span>
+                  </div>
+                )}
               </div>
+
               {curRec?.clockIn && (
                 <div style={{ textAlign: 'right' }}>
                   <div
@@ -661,80 +710,140 @@ export default function AttendanceApp() {
             </div>
           )}
 
-          <div
-            style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}
-          >
-            <button
-              className="btn"
-              onClick={() => handleAction('clockIn')}
-              disabled={curStatus === 'clocked_in' || curStatus === 'on_break'}
-              style={{
-                gridColumn: '1/-1',
-                padding: 13,
-                borderRadius: 8,
-                fontSize: 13,
-                background: curStatus === 'idle' || curStatus === 'clocked_out' ? '#238636' : '#21262d',
-                color: curStatus === 'idle' || curStatus === 'clocked_out' ? '#fff' : '#484f58',
+          {/* ── ACTION AREA (Buttons vs Manager Override) ── */}
+          {needsOverride ? (
+            <div 
+              className="fade-in"
+              style={{ 
+                background: '#1c1626', 
+                padding: 20, 
+                borderRadius: 8, 
+                border: '1px solid #6b21a8', 
+                textAlign: 'center' 
               }}
             >
-              ▶ CLOCK IN
-            </button>
-            <button
-              className="btn"
-              onClick={() => handleAction('breakStart')}
-              disabled={curStatus !== 'clocked_in' || bLeft <= 0}
-              style={{
-                padding: 13,
-                borderRadius: 8,
-                fontSize: 13,
-                background:
-                  curStatus === 'clocked_in' && bLeft > 0
-                    ? '#9a3412'
-                    : '#21262d',
-                color:
-                  curStatus === 'clocked_in' && bLeft > 0
-                    ? '#fed7aa'
-                    : '#484f58',
-              }}
-            >
-              ☕ START BREAK
-            </button>
-            <button
-              className="btn"
-              onClick={() => handleAction('breakEnd')}
-              disabled={curStatus !== 'on_break'}
-              style={{
-                padding: 13,
-                borderRadius: 8,
-                fontSize: 13,
-                background: curStatus === 'on_break' ? '#1d4ed8' : '#21262d',
-                color: curStatus === 'on_break' ? '#bfdbfe' : '#484f58',
-              }}
-            >
-              💼 END BREAK
-            </button>
-            <button
-              className="btn"
-              onClick={() => handleAction('clockOut')}
-              disabled={curStatus !== 'clocked_in' && curStatus !== 'on_break'}
-              style={{
-                gridColumn: '1/-1',
-                padding: 13,
-                borderRadius: 8,
-                fontSize: 13,
-                background:
-                  curStatus === 'clocked_in' || curStatus === 'on_break'
-                    ? '#6e40c9'
-                    : '#21262d',
-                color:
-                  curStatus === 'clocked_in' || curStatus === 'on_break'
-                    ? '#e2d9f3'
-                    : '#484f58',
-              }}
-            >
-              ⏹ CLOCK OUT
-            </button>
-          </div>
+              <div style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, letterSpacing: 1.5, marginBottom: 8 }}>
+                🔒 SCHEDULED DAY OFF
+              </div>
+              <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 18, lineHeight: 1.4 }}>
+                This action requires manager authorization to proceed.
+              </div>
+              
+              <input
+                type="password"
+                value={overridePass}
+                onChange={(e) => { setOverridePass(e.target.value); setOverrideError(''); }}
+                placeholder="Manager Password"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const mgr = MANAGERS.find(m => m.password === overridePass.trim());
+                    if (mgr) {
+                      setOverriddenAgents(p => ({ ...p, [selected]: true }));
+                      setOverridePass('');
+                      setOverrideError('');
+                      setSuccess(`✅ Override granted by ${mgr.name}`);
+                    } else {
+                      setOverrideError('Incorrect manager password.');
+                    }
+                  }
+                }}
+                style={{ ...inputBase, width: '100%', marginBottom: 10, textAlign: 'center', fontSize: 14 }}
+              />
+              
+              {overrideError && <div style={{ color: '#f87171', fontSize: 11, marginBottom: 10 }}>{overrideError}</div>}
+              
+              <button
+                className="btn"
+                onClick={() => {
+                  const mgr = MANAGERS.find(m => m.password === overridePass.trim());
+                  if (mgr) {
+                    setOverriddenAgents(p => ({ ...p, [selected]: true }));
+                    setOverridePass('');
+                    setOverrideError('');
+                    setSuccess(`✅ Override granted by ${mgr.name}`);
+                  } else {
+                    setOverrideError('Incorrect manager password.');
+                  }
+                }}
+                style={{ width: '100%', padding: '12px', borderRadius: 6, background: '#7e22ce', color: '#fff', fontSize: 12 }}
+              >
+                AUTHORIZE CLOCK IN
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <button
+                className="btn"
+                onClick={() => handleAction('clockIn')}
+                disabled={curStatus === 'clocked_in' || curStatus === 'on_break'}
+                style={{
+                  gridColumn: '1/-1',
+                  padding: 13,
+                  borderRadius: 8,
+                  fontSize: 13,
+                  background: curStatus === 'idle' || curStatus === 'clocked_out' ? '#238636' : '#21262d',
+                  color: curStatus === 'idle' || curStatus === 'clocked_out' ? '#fff' : '#484f58',
+                }}
+              >
+                ▶ CLOCK IN
+              </button>
+              <button
+                className="btn"
+                onClick={() => handleAction('breakStart')}
+                disabled={curStatus !== 'clocked_in' || bLeft <= 0}
+                style={{
+                  padding: 13,
+                  borderRadius: 8,
+                  fontSize: 13,
+                  background:
+                    curStatus === 'clocked_in' && bLeft > 0
+                      ? '#9a3412'
+                      : '#21262d',
+                  color:
+                    curStatus === 'clocked_in' && bLeft > 0
+                      ? '#fed7aa'
+                      : '#484f58',
+                }}
+              >
+                ☕ START BREAK
+              </button>
+              <button
+                className="btn"
+                onClick={() => handleAction('breakEnd')}
+                disabled={curStatus !== 'on_break'}
+                style={{
+                  padding: 13,
+                  borderRadius: 8,
+                  fontSize: 13,
+                  background: curStatus === 'on_break' ? '#1d4ed8' : '#21262d',
+                  color: curStatus === 'on_break' ? '#bfdbfe' : '#484f58',
+                }}
+              >
+                💼 END BREAK
+              </button>
+              <button
+                className="btn"
+                onClick={() => handleAction('clockOut')}
+                disabled={curStatus !== 'clocked_in' && curStatus !== 'on_break'}
+                style={{
+                  gridColumn: '1/-1',
+                  padding: 13,
+                  borderRadius: 8,
+                  fontSize: 13,
+                  background:
+                    curStatus === 'clocked_in' || curStatus === 'on_break'
+                      ? '#6e40c9'
+                      : '#21262d',
+                  color:
+                    curStatus === 'clocked_in' || curStatus === 'on_break'
+                      ? '#e2d9f3'
+                      : '#484f58',
+                }}
+              >
+                ⏹ CLOCK OUT
+              </button>
+            </div>
+          )}
 
           {curRec?.clockOut && (
             <div
