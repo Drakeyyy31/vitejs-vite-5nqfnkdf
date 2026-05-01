@@ -107,7 +107,6 @@ export default function AttendanceApp() {
   const [overriddenAgents, setOverriddenAgents] = useState({});
   const [isCheckingCloud, setIsCheckingCloud] = useState(false);
 
-  // ── New Features State ──
   const [isHandoverMode, setIsHandoverMode] = useState(false);
   const [handoverNote, setHandoverNote] = useState('');
   
@@ -115,9 +114,11 @@ export default function AttendanceApp() {
   const [swapD1, setSwapD1] = useState('');
   const [swapA2, setSwapA2] = useState('');
   const [swapD2, setSwapD2] = useState('');
+  
+  // ── New Reporting State ──
+  const [reportTimeframe, setReportTimeframe] = useState('today');
   const [reportData, setReportData] = useState('');
 
-  // ── Sync & Failsafe Timers ──
   useEffect(() => {
     const s = localStorage.getItem('cellumove_att');
     if (s) setRecords(JSON.parse(s));
@@ -133,14 +134,14 @@ export default function AttendanceApp() {
     const t = setInterval(() => {
       const ts = Date.now();
       setNow(ts);
-      // FIX: 10.5-Hour Failsafe Auto-Checkout
+      // 10.5-Hour Failsafe Auto-Checkout
       Object.keys(records).forEach(agentName => {
         const rec = records[agentName];
         if (rec.clockIn && !rec.clockOut && (ts - rec.clockIn > 10.5 * 60 * 60 * 1000)) {
            processAction('autoClockOut', agentName, 'AUTO-CHECKOUT: FORGOT PUNCH');
         }
       });
-    }, 60000); // Check every minute
+    }, 60000); 
     return () => clearInterval(t);
   }, [records]);
 
@@ -156,7 +157,6 @@ export default function AttendanceApp() {
 
   useEffect(() => { if (tab === 'log' || tab === 'manager') fetchLogs(); }, [tab]);
 
-  // ── Shift Swap Parsing Logic ──
   const activeSwaps = useMemo(() => {
     const swaps = [];
     globalLogs.forEach(l => {
@@ -176,8 +176,8 @@ export default function AttendanceApp() {
 
     activeSwaps.forEach(swap => {
       if (agentName === swap.a1) {
-        if (dStr === swap.d1) isOff = false; // Working on normal day off
-        if (dStr === swap.d2) isOff = true;  // Taking temporary day off
+        if (dStr === swap.d1) isOff = false; 
+        if (dStr === swap.d2) isOff = true;  
       }
       if (agentName === swap.a2) {
         if (dStr === swap.d2) isOff = false;
@@ -187,7 +187,6 @@ export default function AttendanceApp() {
     return isOff;
   };
 
-  // ── Core Action Logic ──
   const save = (r) => {
     setRecords(r);
     localStorage.setItem('cellumove_att', JSON.stringify(r));
@@ -243,7 +242,6 @@ export default function AttendanceApp() {
         next = { ...next, onBreak: false, breakStart: null, breakUsedMs: used };
       }
       
-      // FIX: Calculate based on inclusive 8-hour shift
       const totalElapsedMs = ts - rec.clockIn; 
       
       let quotaStatus = checkIsDayOff(agentName, ts) ? `REST DAY OT: ${fmtDur(totalElapsedMs)}` : "";
@@ -280,7 +278,6 @@ export default function AttendanceApp() {
     processAction(action, selected);
   };
 
-  // ── Manager Systems ──
   const handleMgrLogin = () => {
     const mgr = MANAGERS.find(m => m.password === mgrInput.trim());
     if (mgr) { setMgrAuthed(true); setMgrName(mgr.name); setMgrError(''); }
@@ -301,30 +298,89 @@ export default function AttendanceApp() {
     fetchLogs();
   };
 
-  const generateDailyReport = () => {
-    const today = new Date().toDateString();
-    const logsToday = globalLogs.filter(l => new Date(l.timestamp).toDateString() === today);
-    
-    let present = new Set(); let lates = []; let ots = [];
-    logsToday.forEach(l => {
-      if (l.action.startsWith('clockIn')) present.add(l.agent);
-      if (l.action.includes('LATE')) lates.push(l.agent);
-      if (l.action.includes('[OT:') || l.action.includes('REST DAY OT')) ots.push(`${l.agent} (${l.action.split('[')[1].replace(']','')})`);
+  // ── Smart Multi-Timeframe Report Engine ──
+  const generateReport = () => {
+    const now = new Date();
+    let startDate = new Date();
+    let endDate = new Date();
+    let title = "";
+
+    if (reportTimeframe === 'today') {
+      title = "TODAY'S REPORT";
+      startDate.setHours(0,0,0,0);
+      endDate.setHours(23,59,59,999);
+    } else if (reportTimeframe === 'yesterday') {
+      title = "YESTERDAY'S REPORT";
+      startDate.setDate(now.getDate() - 1);
+      startDate.setHours(0,0,0,0);
+      endDate = new Date(startDate);
+      endDate.setHours(23,59,59,999);
+    } else if (reportTimeframe === 'week') {
+      title = "THIS WEEK'S REPORT (Sun - Sat)";
+      startDate.setDate(now.getDate() - now.getDay()); // Start on Sunday
+      startDate.setHours(0,0,0,0);
+      endDate.setHours(23,59,59,999);
+    } else if (reportTimeframe === 'month') {
+      title = "THIS MONTH'S REPORT";
+      startDate.setDate(1); // 1st of the month
+      startDate.setHours(0,0,0,0);
+      endDate.setHours(23,59,59,999);
+    }
+
+    // Filter logs within the selected date range
+    const logsInRange = globalLogs.filter(l => {
+      const ts = new Date(l.timestamp).getTime();
+      return ts >= startDate.getTime() && ts <= endDate.getTime();
     });
 
-    const activeAgents = AGENTS.filter(a => !checkIsDayOff(a.name, Date.now()));
-    const missing = activeAgents.filter(a => {
-       const shiftMs = new Date().setHours(a.shiftStart, 0, 0, 0);
-       return Date.now() > shiftMs && !present.has(a.name);
-    }).map(a => a.name);
+    let latesCount = {};
+    let otRecords = [];
+    let presentDays = {}; // Map: Agent Name -> Set of dates they clocked in
+
+    logsInRange.forEach(l => {
+      const dateStr = new Date(l.timestamp).toDateString();
+      if (l.action.startsWith('clockIn')) {
+        if (!presentDays[l.agent]) presentDays[l.agent] = new Set();
+        presentDays[l.agent].add(dateStr);
+      }
+      if (l.action.includes('LATE')) {
+        latesCount[l.agent] = (latesCount[l.agent] || 0) + 1;
+      }
+      if (l.action.includes('[OT:') || l.action.includes('REST DAY OT')) {
+        const otStr = l.action.match(/\[(.*?)\]/)?.[1] || 'OT';
+        otRecords.push(`${l.agent} (${dateStr.slice(0,10)}: ${otStr})`);
+      }
+    });
+
+    // Calculate exact absences by looping through every valid day in the range
+    let absences = [];
+    const loopEnd = Math.min(endDate.getTime(), now.getTime()); // Don't check the future
+    
+    for (let d = new Date(startDate); d.getTime() <= loopEnd; d.setDate(d.getDate() + 1)) {
+      const dStr = d.toDateString();
+      
+      AGENTS.forEach(a => {
+        const checkDateTs = d.getTime() + 12*60*60*1000; // Noon safety
+        if (checkIsDayOff(a.name, checkDateTs)) return; // Skip if it was their rest day
+
+        // If checking today, and their shift hasn't started yet, skip
+        if (dStr === now.toDateString() && now.getTime() < new Date().setHours(a.shiftStart, 0, 0, 0)) return;
+
+        const hasClockedIn = presentDays[a.name] && presentDays[a.name].has(dStr);
+        if (!hasClockedIn) {
+          absences.push(`${a.name} (${dStr.slice(0,10)})`);
+        }
+      });
+    }
+
+    const latesFormatted = Object.entries(latesCount).map(([agent, count]) => `${agent} (x${count})`);
 
     setReportData(
-      `📅 DAILY OPERATIONS REPORT: ${today}\n` +
+      `📅 ${title} (${fmtDate(startDate)} - ${fmtDate(Math.min(endDate, now))})\n` +
       `-----------------------------------------\n` +
-      `👥 TOTAL PRESENT: ${present.size}\n` +
-      `⚠️ LATE: ${lates.length > 0 ? lates.join(', ') : 'None'}\n` +
-      `🚨 ABSENT/MISSING: ${missing.length > 0 ? missing.join(', ') : 'None'}\n` +
-      `⏱️ OVERTIME: ${ots.length > 0 ? ots.join(', ') : 'None'}\n` +
+      `⚠️ LATES: ${latesFormatted.length > 0 ? latesFormatted.join(', ') : 'None'}\n` +
+      `🚨 ABSENCES: ${absences.length > 0 ? absences.join('\n             ') : 'None'}\n` +
+      `⏱️ OVERTIME: ${otRecords.length > 0 ? otRecords.join('\n             ') : 'None'}\n` +
       `-----------------------------------------`
     );
   };
@@ -346,7 +402,6 @@ export default function AttendanceApp() {
   const isDayOff = selectedAgent ? checkIsDayOff(selectedAgent.name, Date.now()) : false;
   const needsOverride = isDayOff && curStatus === 'idle' && !overriddenAgents[selected];
 
-  // ── Render Utilities ──
   const Badge = ({ status }) => {
     const map = { idle: ['#64748b', 'IDLE'], clocked_in: ['#22c55e', 'CLOCKED IN'], on_break: ['#f59e0b', 'ON BREAK'], clocked_out: ['#3b82f6', 'CLOCKED OUT'], day_off: ['#a78bfa', 'DAY OFF'] };
     const [color, label] = map[status] || map.idle;
@@ -377,7 +432,7 @@ export default function AttendanceApp() {
 
       {/* Header & Tabs */}
       <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>WEAVNONO LLC</div>
+        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>CELLUMOVE · WEAVNONO LLC</div>
         <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 'clamp(26px,5vw,42px)', color: '#e6edf3', margin: 0, letterSpacing: -1 }}>ATTENDANCE <span style={{ color: '#58a6ff' }}>SYSTEM</span></h1>
         <div style={{ fontSize: 11, color: '#8b949e', marginTop: 8 }}>{new Date(now).toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} &nbsp; <span style={{ color: '#58a6ff', fontWeight: 500 }}>{new Date(now).toLocaleTimeString('en-PH')}</span></div>
       </div>
@@ -476,11 +531,23 @@ export default function AttendanceApp() {
              })()}
           </div>
 
-          {/* Daily Report Generator */}
+          {/* Multi-Timeframe Report Generator */}
           <div style={{ ...card, padding: 24 }}>
-             <h3 style={{ margin: '0 0 16px 0', color: '#e6edf3', fontSize: 15 }}>📊 Daily Operations Report</h3>
-             <button className="btn" onClick={generateDailyReport} style={{ width: '100%', padding: 10, borderRadius: 6, background: '#238636', color: '#fff', marginBottom: 16 }}>GENERATE TODAY'S REPORT</button>
-             {reportData && <textarea readOnly value={reportData} style={{ ...inputBase, width: '100%', height: 140, resize: 'none', fontSize: 11 }} />}
+             <h3 style={{ margin: '0 0 16px 0', color: '#e6edf3', fontSize: 15 }}>📊 Operations Report Generator</h3>
+             
+             <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+               <select value={reportTimeframe} onChange={e => setReportTimeframe(e.target.value)} style={{ ...inputBase, flex: 1, fontSize: 12 }}>
+                 <option value="today">Today</option>
+                 <option value="yesterday">Yesterday</option>
+                 <option value="week">This Week (Sun-Sat)</option>
+                 <option value="month">This Month</option>
+               </select>
+               <button className="btn" onClick={generateReport} style={{ flex: 1, padding: 10, borderRadius: 6, background: '#238636', color: '#fff', fontSize: 12 }}>
+                 GENERATE REPORT
+               </button>
+             </div>
+
+             {reportData && <textarea readOnly value={reportData} style={{ ...inputBase, width: '100%', height: 200, resize: 'none', fontSize: 11 }} />}
           </div>
 
           {/* Shift Swapper */}
@@ -506,7 +573,7 @@ export default function AttendanceApp() {
         </div>
       )}
 
-      {/* ── LOG & PIN TABS (Unchanged layout structure, dynamically populated) ── */}
+      {/* ── LOG & PIN TABS ── */}
       {tab === 'log' && (
         <div className="fade-in" style={{ ...card, maxWidth: 900, overflow: 'hidden' }}>
           <div style={{ padding: '18px 24px', borderBottom: '1px solid #21262d', display: 'flex', gap: 12, alignItems: 'center' }}>
