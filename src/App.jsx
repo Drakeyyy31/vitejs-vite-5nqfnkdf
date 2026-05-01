@@ -105,6 +105,8 @@ export default function AttendanceApp() {
   const [mgrName, setMgrName] = useState('');
 
   const [overriddenAgents, setOverriddenAgents] = useState({});
+  const [overridePass, setOverridePass] = useState('');
+  const [overrideError, setOverrideError] = useState('');
   const [isCheckingCloud, setIsCheckingCloud] = useState(false);
 
   const [isHandoverMode, setIsHandoverMode] = useState(false);
@@ -455,7 +457,7 @@ export default function AttendanceApp() {
 
       {/* Header & Tabs */}
       <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>CELLUMOVE · WEAVNONO LLC</div>
+        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>WEAVNONO LLC</div>
         <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 'clamp(26px,5vw,42px)', color: '#e6edf3', margin: 0, letterSpacing: -1 }}>ATTENDANCE <span style={{ color: '#58a6ff' }}>SYSTEM</span></h1>
         <div style={{ fontSize: 11, color: '#8b949e', marginTop: 8 }}>{new Date(now).toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} &nbsp; <span style={{ color: '#58a6ff', fontWeight: 500 }}>{new Date(now).toLocaleTimeString('en-PH')}</span></div>
       </div>
@@ -470,7 +472,7 @@ export default function AttendanceApp() {
       {tab === 'clock' && (
         <div className="fade-in" style={{ ...card, maxWidth: 460, padding: '32px 28px' }}>
           <label style={labelStyle}>SELECT AGENT</label>
-          <select value={selected} onChange={(e) => { setSelected(e.target.value); setPin(''); setError(''); setSuccess(''); setIsHandoverMode(false); }} style={{ ...inputBase, width: '100%', fontSize: 14, marginBottom: 18 }}>
+          <select value={selected} onChange={(e) => { setSelected(e.target.value); setPin(''); setError(''); setSuccess(''); setIsHandoverMode(false); setOverridePass(''); setOverrideError(''); }} style={{ ...inputBase, width: '100%', fontSize: 14, marginBottom: 18 }}>
             <option value="">— Choose your name —</option>
             {AGENTS.map(a => <option key={a.name} value={a.name}>{a.name}</option>)}
           </select>
@@ -495,11 +497,63 @@ export default function AttendanceApp() {
               {success && <div style={{ color: '#4ade80', fontSize: 13, marginBottom: 14, textAlign: 'center' }}>{success}</div>}
 
               {needsOverride ? (
-                <div style={{ background: '#1c1626', padding: 20, borderRadius: 8, border: '1px solid #6b21a8', textAlign: 'center' }}>
-                  <div style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, marginBottom: 8 }}>🔒 SCHEDULED DAY OFF</div>
-                  <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 16 }}>Request OT approval from a manager, then click below.</div>
-                  <button className="btn" onClick={checkCloudOverride} disabled={isCheckingCloud} style={{ width: '100%', padding: 12, borderRadius: 6, background: '#7e22ce', color: '#fff', fontSize: 12 }}>
-                    {isCheckingCloud ? '↻ CHECKING CLOUD...' : '☁️ CHECK CLOUD APPROVAL'}
+                <div className="fade-in" style={{ background: '#1c1626', padding: 20, borderRadius: 8, border: '1px solid #6b21a8', textAlign: 'center' }}>
+                  <div style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, letterSpacing: 1.5, marginBottom: 8 }}>🔒 SCHEDULED DAY OFF</div>
+                  <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 18, lineHeight: 1.4 }}>If you have requested OT, wait for manager approval and click Check Cloud below.</div>
+                  
+                  {/* For the WFH Agent */}
+                  <button className="btn" onClick={checkCloudOverride} disabled={isCheckingCloud} style={{ width: '100%', padding: '12px', borderRadius: 6, background: '#21262d', color: '#e6edf3', fontSize: 12, marginBottom: 16, border: '1px solid #30363d' }}>
+                    {isCheckingCloud ? '↻ CHECKING CLOUD...' : '☁️ CHECK CLOUD FOR APPROVAL'}
+                  </button>
+
+                  <div style={{ fontSize: 10, color: '#484f58', marginBottom: 16, letterSpacing: 1 }}>— OR AUTHORIZE DIRECTLY (MANAGERS ONLY) —</div>
+                  
+                  {/* For the Manager */}
+                  <input
+                    type="password"
+                    value={overridePass}
+                    onChange={(e) => { setOverridePass(e.target.value); setOverrideError(''); }}
+                    placeholder="Manager Password"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const mgr = MANAGERS.find(m => m.password === overridePass.trim());
+                        if (mgr) {
+                          setOverriddenAgents(p => ({ ...p, [selected]: true }));
+                          setOverridePass('');
+                          setOverrideError('');
+                          setSuccess(`✅ Override granted by ${mgr.name} and synced to cloud.`);
+                          
+                          const ts = Date.now();
+                          logToSheets({ date: fmtDate(ts), time: fmt(ts), action: 'Manager Override', agent: selected, device: `Authorized by: ${mgr.name}`, timestamp: ts });
+                        } else {
+                          setOverrideError('Incorrect manager password.');
+                        }
+                      }
+                    }}
+                    style={{ ...inputBase, width: '100%', marginBottom: 10, textAlign: 'center', fontSize: 14 }}
+                  />
+                  
+                  {overrideError && <div style={{ color: '#f87171', fontSize: 11, marginBottom: 10 }}>{overrideError}</div>}
+                  
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      const mgr = MANAGERS.find(m => m.password === overridePass.trim());
+                      if (mgr) {
+                        setOverriddenAgents(p => ({ ...p, [selected]: true }));
+                        setOverridePass('');
+                        setOverrideError('');
+                        setSuccess(`✅ Override granted by ${mgr.name} and synced to cloud.`);
+                        
+                        const ts = Date.now();
+                        logToSheets({ date: fmtDate(ts), time: fmt(ts), action: 'Manager Override', agent: selected, device: `Authorized by: ${mgr.name}`, timestamp: ts });
+                      } else {
+                        setOverrideError('Incorrect manager password.');
+                      }
+                    }}
+                    style={{ width: '100%', padding: '12px', borderRadius: 6, background: '#7e22ce', color: '#fff', fontSize: 12 }}
+                  >
+                    AUTHORIZE SHIFT & SYNC TO CLOUD
                   </button>
                 </div>
               ) : (
