@@ -117,7 +117,6 @@ export default function AttendanceApp() {
   const [swapA2, setSwapA2] = useState('');
   const [swapD2, setSwapD2] = useState('');
   
-  // ── New Reporting State ──
   const [reportTimeframe, setReportTimeframe] = useState('today');
   const [reportData, setReportData] = useState('');
 
@@ -147,15 +146,27 @@ export default function AttendanceApp() {
     return () => clearInterval(t);
   }, [records]);
 
+  // ── FIX: ROBUST FETCH AND PARSE ──
   const fetchLogs = async () => {
     setIsLoadingLogs(true);
     try {
       const response = await fetch(SHEETS_WEBHOOK);
-      const data = await response.json();
-      const sortedData = data.sort((a, b) => b.timestamp - a.timestamp);
+      const rawData = await response.json();
+
+      // Ensure timestamp is a valid number, parsing from Date string if needed
+      const cleanData = rawData.map(l => {
+        let validTs = Number(l.timestamp);
+        // Fallback if the Google Sheet sends string, undefined, or missing header
+        if (!validTs || isNaN(validTs)) {
+          validTs = new Date(`${l.date} ${l.time}`).getTime();
+        }
+        return { ...l, timestamp: validTs };
+      });
+
+      const sortedData = cleanData.sort((a, b) => b.timestamp - a.timestamp);
       setGlobalLogs(sortedData);
       setIsLoadingLogs(false);
-      return sortedData; // Return fresh data directly
+      return sortedData; 
     } catch (error) { 
       console.error("Failed to fetch logs"); 
       setIsLoadingLogs(false);
@@ -306,7 +317,6 @@ export default function AttendanceApp() {
     fetchLogs();
   };
 
-  // ── Smart Multi-Timeframe Report Engine ──
   const generateReport = () => {
     const now = new Date();
     let startDate = new Date();
@@ -335,7 +345,6 @@ export default function AttendanceApp() {
       endDate.setHours(23,59,59,999);
     }
 
-    // Filter logs within the selected date range
     const logsInRange = globalLogs.filter(l => {
       const ts = new Date(l.timestamp).getTime();
       return ts >= startDate.getTime() && ts <= endDate.getTime();
@@ -343,22 +352,19 @@ export default function AttendanceApp() {
 
     let latesByDate = {};
     let otByDate = {};
-    let presentDays = {}; // Map: Agent Name -> Set of dates they clocked in
+    let presentDays = {}; 
 
     logsInRange.forEach(l => {
       const dateStr = new Date(l.timestamp).toDateString();
       
-      // Track Presence
       if (l.action.startsWith('clockIn')) {
         if (!presentDays[l.agent]) presentDays[l.agent] = new Set();
         presentDays[l.agent].add(dateStr);
       }
-      // Track Lates
       if (l.action.includes('LATE')) {
         if (!latesByDate[dateStr]) latesByDate[dateStr] = [];
         latesByDate[dateStr].push(l.agent);
       }
-      // Track OT
       if (l.action.includes('[OT:') || l.action.includes('REST DAY OT')) {
         const otStr = l.action.match(/\[(.*?)\]/)?.[1] || 'OT';
         if (!otByDate[dateStr]) otByDate[dateStr] = [];
@@ -369,25 +375,21 @@ export default function AttendanceApp() {
     let latesFormatted = [];
     let absencesFormatted = [];
     let otFormatted = [];
-    const loopEnd = Math.min(endDate.getTime(), now.getTime()); // Don't check the future
+    const loopEnd = Math.min(endDate.getTime(), now.getTime()); 
     
-    // Loop through every day in the timeframe to build clean categories
     for (let d = new Date(startDate); d.getTime() <= loopEnd; d.setDate(d.getDate() + 1)) {
       const dStr = d.toDateString();
-      const shortDate = dStr.slice(0,10); // e.g. "Sun Apr 26"
+      const shortDate = dStr.slice(0,10); 
       
-      // 1. Process Lates
       if (latesByDate[dStr] && latesByDate[dStr].length > 0) {
         latesFormatted.push(`\n    --- ${shortDate} ---\n    ` + latesByDate[dStr].join('\n    '));
       }
 
-      // 2. Process Absences
       let dailyMissing = [];
       AGENTS.forEach(a => {
-        const checkDateTs = d.getTime() + 12*60*60*1000; // Noon safety
-        if (checkIsDayOff(a.name, checkDateTs)) return; // Skip if it was their rest day
+        const checkDateTs = d.getTime() + 12*60*60*1000; 
+        if (checkIsDayOff(a.name, checkDateTs)) return; 
 
-        // If checking today, and their shift hasn't started yet, skip
         if (dStr === now.toDateString() && now.getTime() < new Date().setHours(a.shiftStart, 0, 0, 0)) return;
 
         const hasClockedIn = presentDays[a.name] && presentDays[a.name].has(dStr);
@@ -400,7 +402,6 @@ export default function AttendanceApp() {
         absencesFormatted.push(`\n    --- ${shortDate} ---\n    ` + dailyMissing.join('\n    '));
       }
 
-      // 3. Process OT
       if (otByDate[dStr] && otByDate[dStr].length > 0) {
         otFormatted.push(`\n    --- ${shortDate} ---\n    ` + otByDate[dStr].join('\n    '));
       }
@@ -416,15 +417,18 @@ export default function AttendanceApp() {
     );
   };
 
+  // ── FIX: ROBUST CLOUD OVERRIDE CHECK ──
   const checkCloudOverride = async () => {
     setIsCheckingCloud(true); setError('');
     try {
-      const freshLogs = await fetchLogs(); // Grabs fresh data instantly
+      const freshLogs = await fetchLogs(); // Grabs fixed numeric timestamps
       
+      const todayStr = new Date().toDateString();
+
       const hasOverride = freshLogs.some(l => 
         l.agent === selected && 
         l.action === 'Manager Override' && 
-        new Date(l.timestamp).toDateString() === new Date().toDateString()
+        new Date(l.timestamp).toDateString() === todayStr
       );
       
       if (hasOverride) { 
