@@ -94,8 +94,7 @@ export default function AttendanceApp() {
   const [now, setNow] = useState(Date.now());
   const [tab, setTab] = useState('clock');
   const [filterAgent, setFilterAgent] = useState('all');
-  const [filterDate, setFilterDate] = useState('');
-
+  
   const [globalLogs, setGlobalLogs] = useState([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
@@ -135,28 +134,24 @@ export default function AttendanceApp() {
     const t = setInterval(() => {
       const ts = Date.now();
       setNow(ts);
-      // 10.5-Hour Failsafe Auto-Checkout
       Object.keys(records).forEach(agentName => {
         const rec = records[agentName];
         if (rec.clockIn && !rec.clockOut && (ts - rec.clockIn > 10.5 * 60 * 60 * 1000)) {
            processAction('autoClockOut', agentName, 'AUTO-CHECKOUT: FORGOT PUNCH');
         }
       });
-    }, 60000); 
+    }, 1000); 
     return () => clearInterval(t);
   }, [records]);
 
-  // ── FIX: ROBUST FETCH AND PARSE ──
   const fetchLogs = async () => {
     setIsLoadingLogs(true);
     try {
       const response = await fetch(SHEETS_WEBHOOK);
       const rawData = await response.json();
 
-      // Ensure timestamp is a valid number, parsing from Date string if needed
       const cleanData = rawData.map(l => {
         let validTs = Number(l.timestamp);
-        // Fallback if the Google Sheet sends string, undefined, or missing header
         if (!validTs || isNaN(validTs)) {
           validTs = new Date(`${l.date} ${l.time}`).getTime();
         }
@@ -303,6 +298,14 @@ export default function AttendanceApp() {
     else setMgrError('Incorrect password.');
   };
 
+  // ── RESTORED: THE LOGOUT FUNCTION ──
+  const handleMgrLogout = () => {
+    setMgrAuthed(false);
+    setMgrName('');
+    setMgrInput('');
+    setMgrError('');
+  };
+
   const processShiftSwap = async () => {
     if (!swapA1 || !swapA2 || !swapD1 || !swapD2) return alert('Fill all swap fields.');
     const d1Str = new Date(swapD1 + 'T12:00:00').toDateString();
@@ -417,12 +420,10 @@ export default function AttendanceApp() {
     );
   };
 
-  // ── FIX: ROBUST CLOUD OVERRIDE CHECK ──
   const checkCloudOverride = async () => {
     setIsCheckingCloud(true); setError('');
     try {
-      const freshLogs = await fetchLogs(); // Grabs fixed numeric timestamps
-      
+      const freshLogs = await fetchLogs(); 
       const todayStr = new Date().toDateString();
 
       const hasOverride = freshLogs.some(l => 
@@ -448,6 +449,9 @@ export default function AttendanceApp() {
   const selectedAgent = AGENTS.find(a => a.name === selected);
   const isDayOff = selectedAgent ? checkIsDayOff(selectedAgent.name, Date.now()) : false;
   const needsOverride = isDayOff && curStatus === 'idle' && !overriddenAgents[selected];
+  
+  const bLeft = breakLeft(curRec);
+  const bUsed = curRec ? (curRec.breakUsedMs || 0) + (curRec.onBreak && curRec.breakStart ? now - curRec.breakStart : 0) : 0;
 
   const Badge = ({ status }) => {
     const map = { idle: ['#64748b', 'IDLE'], clocked_in: ['#22c55e', 'CLOCKED IN'], on_break: ['#f59e0b', 'ON BREAK'], clocked_out: ['#3b82f6', 'CLOCKED OUT'], day_off: ['#a78bfa', 'DAY OFF'] };
@@ -510,6 +514,20 @@ export default function AttendanceApp() {
             </div>
           )}
 
+          {selected && curRec?.clockIn && !curRec?.clockOut && (
+            <div className="fade-in" style={{ marginBottom: 18 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: '#8b949e', marginBottom: 5 }}>
+                <span>BREAK USED</span>
+                <span style={{ color: bLeft < 60000 ? '#f87171' : '#58a6ff' }}>
+                  {fmtDur(bUsed)} / 60m &nbsp;·&nbsp; <b>{fmtDur(bLeft)} left</b>
+                </span>
+              </div>
+              <div style={{ background: '#21262d', borderRadius: 4, height: 7, overflow: 'hidden' }}>
+                <div style={{ height: '100%', borderRadius: 4, width: `${Math.min(100, (bUsed / BREAK_LIMIT_MS) * 100)}%`, background: bLeft < 60000 ? '#f87171' : '#58a6ff', transition: 'width 1s linear' }} />
+              </div>
+            </div>
+          )}
+
           {!isHandoverMode && (
             <>
               <label style={labelStyle}>ENTER PIN</label>
@@ -523,14 +541,12 @@ export default function AttendanceApp() {
                   <div style={{ color: '#c084fc', fontSize: 12, fontWeight: 700, letterSpacing: 1.5, marginBottom: 8 }}>🔒 SCHEDULED DAY OFF</div>
                   <div style={{ fontSize: 11, color: '#8b949e', marginBottom: 18, lineHeight: 1.4 }}>If you have requested OT, wait for manager approval and click Check Cloud below.</div>
                   
-                  {/* For the WFH Agent */}
                   <button className="btn" onClick={checkCloudOverride} disabled={isCheckingCloud} style={{ width: '100%', padding: '12px', borderRadius: 6, background: '#21262d', color: '#e6edf3', fontSize: 12, marginBottom: 16, border: '1px solid #30363d' }}>
                     {isCheckingCloud ? '↻ CHECKING CLOUD...' : '☁️ CHECK CLOUD FOR APPROVAL'}
                   </button>
 
                   <div style={{ fontSize: 10, color: '#484f58', marginBottom: 16, letterSpacing: 1 }}>— OR AUTHORIZE DIRECTLY (MANAGERS ONLY) —</div>
                   
-                  {/* For the Manager */}
                   <input
                     type="password"
                     value={overridePass}
@@ -580,10 +596,10 @@ export default function AttendanceApp() {
                 </div>
               ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                  <button className="btn" onClick={() => attemptAction('clockIn')} disabled={curStatus === 'clocked_in' || curStatus === 'on_break'} style={{ gridColumn: '1/-1', padding: 13, borderRadius: 8, background: curStatus === 'idle' || curStatus === 'clocked_out' ? '#238636' : '#21262d', color: '#fff' }}>▶ CLOCK IN</button>
-                  <button className="btn" onClick={() => attemptAction('breakStart')} disabled={curStatus !== 'clocked_in'} style={{ padding: 13, borderRadius: 8, background: curStatus === 'clocked_in' ? '#9a3412' : '#21262d', color: '#fff' }}>☕ BREAK START</button>
-                  <button className="btn" onClick={() => attemptAction('breakEnd')} disabled={curStatus !== 'on_break'} style={{ padding: 13, borderRadius: 8, background: curStatus === 'on_break' ? '#1d4ed8' : '#21262d', color: '#fff' }}>💼 BREAK END</button>
-                  <button className="btn" onClick={() => attemptAction('clockOut')} disabled={curStatus !== 'clocked_in' && curStatus !== 'on_break'} style={{ gridColumn: '1/-1', padding: 13, borderRadius: 8, background: curStatus === 'clocked_in' || curStatus === 'on_break' ? '#6e40c9' : '#21262d', color: '#fff' }}>⏹ CLOCK OUT</button>
+                  <button className="btn" onClick={() => attemptAction('clockIn')} disabled={curStatus === 'clocked_in' || curStatus === 'on_break'} style={{ gridColumn: '1/-1', padding: 13, borderRadius: 8, background: curStatus === 'idle' || curStatus === 'clocked_out' ? '#238636' : '#21262d', color: curStatus === 'idle' || curStatus === 'clocked_out' ? '#fff' : '#484f58' }}>▶ CLOCK IN</button>
+                  <button className="btn" onClick={() => attemptAction('breakStart')} disabled={curStatus !== 'clocked_in' || bLeft <= 0} style={{ padding: 13, borderRadius: 8, background: curStatus === 'clocked_in' && bLeft > 0 ? '#9a3412' : '#21262d', color: curStatus === 'clocked_in' && bLeft > 0 ? '#fed7aa' : '#484f58' }}>☕ BREAK START</button>
+                  <button className="btn" onClick={() => attemptAction('breakEnd')} disabled={curStatus !== 'on_break'} style={{ padding: 13, borderRadius: 8, background: curStatus === 'on_break' ? '#1d4ed8' : '#21262d', color: curStatus === 'on_break' ? '#bfdbfe' : '#484f58' }}>💼 BREAK END</button>
+                  <button className="btn" onClick={() => attemptAction('clockOut')} disabled={curStatus !== 'clocked_in' && curStatus !== 'on_break'} style={{ gridColumn: '1/-1', padding: 13, borderRadius: 8, background: curStatus === 'clocked_in' || curStatus === 'on_break' ? '#6e40c9' : '#21262d', color: curStatus === 'clocked_in' || curStatus === 'on_break' ? '#e2d9f3' : '#484f58' }}>⏹ CLOCK OUT</button>
                 </div>
               )}
             </>
@@ -617,7 +633,8 @@ export default function AttendanceApp() {
         <div className="fade-in" style={{ width: '100%', maxWidth: 860, display: 'grid', gap: 20, gridTemplateColumns: '1fr 1fr' }}>
           
           {/* Missing Agents Panel */}
-          <div style={{ ...card, padding: 24 }}>
+          <div style={{ ...card, padding: 24, position: 'relative' }}>
+             <button className="btn" onClick={handleMgrLogout} style={{ position: 'absolute', top: 20, right: 20, background: '#21262d', color: '#f87171', borderRadius: 6, padding: '6px 12px', fontSize: 11 }}>🔒 Lock Dashboard</button>
              <h3 style={{ margin: '0 0 16px 0', color: '#e6edf3', fontSize: 15 }}>🚨 Live Absence Tracker</h3>
              {(() => {
                 const present = new Set(globalLogs.filter(l => l.action.startsWith('clockIn') && new Date(l.timestamp).toDateString() === new Date().toDateString()).map(l => l.agent));
@@ -707,9 +724,12 @@ export default function AttendanceApp() {
           </div>
           <div style={{ maxHeight: 520, overflowY: 'auto' }}>
             {AGENTS.map((a, i) => (
-              <div key={a.name} className="row-hover" style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 24px', borderBottom: '1px solid #21262d' }}>
-                <span style={{ color: '#e6edf3', fontSize: 13 }}>{a.name}</span>
-                <span style={{ fontFamily: 'monospace', fontSize: 18, fontWeight: 700, color: '#58a6ff', letterSpacing: 5 }}>{a.pin}</span>
+              <div key={a.name} className="row-hover" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '9px 24px', borderBottom: i < AGENTS.length - 1 ? '1px solid #21262d' : 'none' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ width: 22, height: 22, borderRadius: '50%', background: '#21262d', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#8b949e' }}>{i + 1}</span>
+                  <span style={{ color: '#e6edf3', fontSize: 13, fontWeight: 500 }}>{a.name}</span>
+                </div>
+                <span style={{ fontFamily: 'monospace', fontSize: 18, fontWeight: 700, color: '#58a6ff', letterSpacing: 5, background: '#0d1117', padding: '4px 14px', borderRadius: 6, border: '1px solid #21262d' }}>{a.pin}</span>
               </div>
             ))}
           </div>
