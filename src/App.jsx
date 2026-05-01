@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 
 // ── SYSTEM CONFIG ──
 const SHEETS_WEBHOOK = 'https://script.google.com/macros/s/AKfycbzodvlY8lLDK3AYtmYpBnDOSjIbwS90FHeDFsc6ssUtxIQZvIrpRm4jydNwZk73LkEA/exec';
+const ADMIN_SECRET_KEY = "ADMIN-2026-SUPER"; // The code to grant Manager status
 
 const fmt = (d) => d ? new Date(d).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' }) : '—';
@@ -28,6 +29,7 @@ export default function AttendanceApp() {
   const [regForm, setRegForm] = useState({ name: '', pin: '', platform: 'META' });
   const [approvalSalary, setApprovalSalary] = useState('');
   const [makeManager, setMakeManager] = useState(false);
+  const [securityKeyInput, setSecurityKeyKeyInput] = useState('');
   
   const [loginForm, setLoginForm] = useState({ name: '', pin: '' });
   const [mgrInput, setMgrInput] = useState('');
@@ -62,26 +64,37 @@ export default function AttendanceApp() {
   const handleRegister = async () => {
     if (!regForm.name || regForm.pin.length < 4) return setError("Fill all fields (PIN min 4 chars)");
     setIsLoading(true);
-    const payload = { date: fmtDate(Date.now()), time: fmt(Date.now()), action: 'USER_REGISTER', agent: regForm.name, device: JSON.stringify(regForm), timestamp: Date.now() };
+    const payload = { date: fmtDate(Date.now()), time: fmt(Date.now()), action: 'USER_REGISTER', agent: regForm.name.trim(), device: JSON.stringify(regForm), timestamp: Date.now() };
     await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
-    setSuccess("Request sent! A manager must approve and set your salary.");
+    setSuccess("Onboarding request sent! Managers can now approve your account.");
     setTimeout(() => { setView('landing'); setSuccess(''); }, 3000);
   };
 
   const handleApproveUser = async (agent) => {
     if (!approvalSalary) return alert("Please set a monthly salary first.");
-    const updatedAgent = { ...agent, salary: Number(approvalSalary), role: makeManager ? 'Manager' : 'Agent' };
+    
+    let finalRole = 'Agent';
+    if (makeManager) {
+      if (securityKeyInput !== ADMIN_SECRET_KEY) return alert("Invalid Security Key. You cannot assign a Manager role without the master code.");
+      finalRole = 'Manager';
+    }
+
+    const updatedAgent = { ...agent, salary: Number(approvalSalary), role: finalRole };
     const payload = { date: fmtDate(Date.now()), time: fmt(Date.now()), action: 'USER_APPROVE', agent: agent.name, device: JSON.stringify(updatedAgent), timestamp: Date.now() };
     await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
     setApprovalSalary('');
     setMakeManager(false);
+    setSecurityKeyKeyInput('');
     fetchData();
   };
 
   const handleLogin = () => {
-    const user = dynamicAgents.find(a => a.name === loginForm.name && a.pin === loginForm.pin);
-    if (!user) return setError("Invalid credentials.");
-    if (user.status === 'pending') return setError("Account pending approval.");
+    // Search by typed username (case insensitive)
+    const user = dynamicAgents.find(a => a.name.toLowerCase() === loginForm.name.toLowerCase().trim() && a.pin === loginForm.pin);
+    
+    if (!user) return setError("Incorrect username or password.");
+    if (user.status === 'pending') return setError("Account pending approval. Contact Drakeyyy or Egar.");
+    
     setLoggedInUser(user);
     setView(user.role === 'Manager' ? 'mgrPortal' : 'agentPortal');
   };
@@ -98,40 +111,38 @@ export default function AttendanceApp() {
     <div style={{ minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '40px 20px' }}>
       
       <div style={{ textAlign: 'center', marginBottom: 30 }}>
-        <h1 style={{ fontSize: 28, margin: 0 }}>CELLUMOVE <span style={{ color: '#58a6ff' }}>HQ</span></h1>
+        <h1 style={{ fontSize: 28, margin: 0, letterSpacing: -1 }}>CELLUMOVE <span style={{ color: '#58a6ff' }}>WORKSPACE</span></h1>
         <div style={{ fontSize: 12, color: '#8b949e', marginTop: 10 }}>{new Date(now).toLocaleTimeString('en-PH')}</div>
       </div>
 
       {view === 'landing' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 15, width: 300 }}>
-          <button onClick={() => setView('login')} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>LOGIN</button>
-          <button onClick={() => setView('register')} style={{ ...btnStyle, background: '#1f6feb', color: '#fff' }}>CREATE ACCOUNT</button>
+          <button onClick={() => setView('login')} style={{ ...btnStyle, background: '#238636', color: '#fff', fontSize: 16 }}>LOGIN</button>
+          <button onClick={() => setView('register')} style={{ ...btnStyle, background: '#1f6feb', color: '#fff', fontSize: 16 }}>CREATE ACCOUNT</button>
         </div>
       )}
 
       {view === 'register' && (
         <div style={cardStyle}>
-          <h2>Sign Up</h2>
-          <input placeholder="Full Name" onChange={e => setRegForm({...regForm, name: e.target.value})} style={inputStyle} />
-          <input placeholder="Create PIN" type="password" onChange={e => setRegForm({...regForm, pin: e.target.value})} style={inputStyle} />
+          <h2 style={{ marginTop: 0 }}>Register</h2>
+          <input placeholder="Username (ex: Drakeyyy)" onChange={e => setRegForm({...regForm, name: e.target.value})} style={inputStyle} />
+          <input placeholder="Password" type="password" onChange={e => setRegForm({...regForm, pin: e.target.value})} style={inputStyle} />
           <select onChange={e => setRegForm({...regForm, platform: e.target.value})} style={inputStyle}>
             <option>META</option><option>KANAL</option><option>Helpwave</option><option>Chargeback</option><option>DMCA</option>
           </select>
-          <button onClick={handleRegister} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>REGISTER</button>
+          <button onClick={handleRegister} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>SUBMIT REQUEST</button>
           <button onClick={() => setView('landing')} style={{ ...btnStyle, width: '100%', background: 'transparent', color: '#8b949e', marginTop: 10 }}>Back</button>
           {success && <p style={{ color: '#4ade80', textAlign: 'center' }}>{success}</p>}
+          {error && <p style={{ color: '#f87171', textAlign: 'center' }}>{error}</p>}
         </div>
       )}
 
       {view === 'login' && (
         <div style={cardStyle}>
-          <h2>Portal Login</h2>
-          <select onChange={e => setLoginForm({...loginForm, name: e.target.value})} style={inputStyle}>
-            <option value="">Choose User</option>
-            {dynamicAgents.filter(a => a.status === 'active').map(a => <option key={a.name}>{a.name}</option>)}
-          </select>
-          <input placeholder="PIN" type="password" onChange={e => setLoginForm({...loginForm, pin: e.target.value})} style={inputStyle} />
-          <button onClick={handleLogin} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>ENTER</button>
+          <h2>Secure Login</h2>
+          <input placeholder="Username" onChange={e => setLoginForm({...loginForm, name: e.target.value})} style={inputStyle} />
+          <input placeholder="Password" type="password" onChange={e => setLoginForm({...loginForm, pin: e.target.value})} style={inputStyle} />
+          <button onClick={handleLogin} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>SIGN IN</button>
           <button onClick={() => setView('landing')} style={{ ...btnStyle, width: '100%', background: 'transparent', color: '#8b949e', marginTop: 10 }}>Back</button>
           {error && <p style={{ color: '#f87171', textAlign: 'center' }}>{error}</p>}
         </div>
@@ -148,6 +159,7 @@ export default function AttendanceApp() {
                <button onClick={() => handleAction('pauseStart')} style={{ ...btnStyle, background: '#ea580c', color: '#fff' }}>PAUSE</button>
                <button onClick={() => handleAction('pauseEnd')} style={{ ...btnStyle, background: '#1d4ed8', color: '#fff' }}>RESUME</button>
             </div>
+            {success && <p style={{ color: '#4ade80', textAlign: 'center', marginTop: 15 }}>{success}</p>}
           </div>
           <button onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', border: 'none', color: '#f87171', marginTop: 20 }}>Logout</button>
         </div>
@@ -162,35 +174,48 @@ export default function AttendanceApp() {
 
           {mgrTab === 'dashboard' && (
             <div style={cardStyle}>
-              <h3>Daily Coverage ({filterDate})</h3>
+              <h3>Attendance Activity ({filterDate})</h3>
               <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)} style={inputStyle} />
-              {globalLogs.filter(l => fmtInputDate(l.timestamp) === filterDate).map((l, i) => (
-                <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid #30363d', fontSize: 13 }}>
-                  <b>{l.agent}</b>: {l.action} at {l.time}
-                </div>
-              ))}
+              <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                {globalLogs.filter(l => fmtInputDate(l.timestamp) === filterDate).map((l, i) => (
+                  <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid #30363d', fontSize: 13, display: 'flex', justifyContent: 'space-between' }}>
+                    <span><b>{l.agent}</b>: {l.action}</span>
+                    <span style={{ color: '#8b949e' }}>{l.time}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
           {mgrTab === 'onboarding' && (
             <div style={cardStyle}>
-              <h3>Pending Approvals</h3>
-              <div style={{ background: '#1c2128', padding: 15, borderRadius: 8, marginBottom: 20, border: '1px solid #6b21a8' }}>
-                <p style={{ fontSize: 12, color: '#c084fc', marginTop: 0 }}>Step 1: Set Monthly Salary (USD)</p>
-                <input placeholder="Ex: 260" type="number" value={approvalSalary} onChange={e => setApprovalSalary(e.target.value)} style={inputStyle} />
-                <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input type="checkbox" checked={makeManager} onChange={e => setMakeManager(e.target.checked)} /> Approve as Manager?
+              <h3>Approve Users & Set Salary</h3>
+              <div style={{ background: '#1c2128', padding: 20, borderRadius: 8, marginBottom: 20, border: '1px solid #6b21a8' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15, marginBottom: 15 }}>
+                  <div>
+                    <label style={{ fontSize: 11, color: '#c084fc', display: 'block', marginBottom: 5 }}>MONTHLY SALARY (USD)</label>
+                    <input placeholder="Ex: 600" type="number" value={approvalSalary} onChange={e => setApprovalSalary(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: '#f87171', display: 'block', marginBottom: 5 }}>MANAGER SECURITY KEY</label>
+                    <input placeholder="Code for manager role" type="password" value={securityKeyInput} onChange={e => setSecurityKeyKeyInput(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+                  </div>
+                </div>
+                <label style={{ fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={makeManager} onChange={e => setMakeManager(e.target.checked)} /> Check to assign <b>Manager Privileges</b>
                 </label>
               </div>
+              
               {dynamicAgents.filter(a => a.status === 'pending').map((a, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '15px 0', borderBottom: '1px solid #30363d' }}>
                   <span>{a.name} ({a.platform})</span>
-                  <button onClick={() => handleApproveUser(a)} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>FINALIZE & APPROVE</button>
+                  <button onClick={() => handleApproveUser(a)} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>ACTIVATE USER</button>
                 </div>
               ))}
+              {dynamicAgents.filter(a => a.status === 'pending').length === 0 && <p style={{ color: '#8b949e', textAlign: 'center' }}>No new accounts to approve.</p>}
             </div>
           )}
-          <button onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', border: 'none', color: '#f87171', marginTop: 20 }}>Exit Command Center</button>
+          <button onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', border: 'none', color: '#f87171', marginTop: 20, cursor: 'pointer' }}>Exit Command Center</button>
         </div>
       )}
     </div>
