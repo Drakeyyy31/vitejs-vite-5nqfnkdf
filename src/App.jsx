@@ -152,9 +152,15 @@ export default function AttendanceApp() {
     try {
       const response = await fetch(SHEETS_WEBHOOK);
       const data = await response.json();
-      setGlobalLogs(data.sort((a, b) => b.timestamp - a.timestamp));
-    } catch (error) { console.error("Failed to fetch logs"); }
-    setIsLoadingLogs(false);
+      const sortedData = data.sort((a, b) => b.timestamp - a.timestamp);
+      setGlobalLogs(sortedData);
+      setIsLoadingLogs(false);
+      return sortedData; // Return fresh data directly
+    } catch (error) { 
+      console.error("Failed to fetch logs"); 
+      setIsLoadingLogs(false);
+      return []; 
+    }
   };
 
   useEffect(() => { if (tab === 'log' || tab === 'manager') fetchLogs(); }, [tab]);
@@ -413,11 +419,23 @@ export default function AttendanceApp() {
   const checkCloudOverride = async () => {
     setIsCheckingCloud(true); setError('');
     try {
-      await fetchLogs();
-      const hasOverride = globalLogs.some(l => l.agent === selected && l.action === 'Manager Override' && new Date(l.timestamp).toDateString() === new Date().toDateString());
-      if (hasOverride) { setOverriddenAgents(p => ({ ...p, [selected]: true })); setSuccess('✅ Cloud authorization found!'); }
-      else setError('No authorization found yet.');
-    } catch (e) { setError('Network error.'); }
+      const freshLogs = await fetchLogs(); // Grabs fresh data instantly
+      
+      const hasOverride = freshLogs.some(l => 
+        l.agent === selected && 
+        l.action === 'Manager Override' && 
+        new Date(l.timestamp).toDateString() === new Date().toDateString()
+      );
+      
+      if (hasOverride) { 
+        setOverriddenAgents(p => ({ ...p, [selected]: true })); 
+        setSuccess('✅ Cloud authorization found!'); 
+      } else { 
+        setError('No authorization found yet.'); 
+      }
+    } catch (e) { 
+      setError('Network error.'); 
+    }
     setIsCheckingCloud(false);
   };
 
@@ -457,7 +475,7 @@ export default function AttendanceApp() {
 
       {/* Header & Tabs */}
       <div style={{ textAlign: 'center', marginBottom: 32 }}>
-        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>WEAVNONO LLC</div>
+        <div style={{ fontSize: 10, letterSpacing: 4, color: '#58a6ff', marginBottom: 8 }}>CELLUMOVE · WEAVNONO LLC</div>
         <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 'clamp(26px,5vw,42px)', color: '#e6edf3', margin: 0, letterSpacing: -1 }}>ATTENDANCE <span style={{ color: '#58a6ff' }}>SYSTEM</span></h1>
         <div style={{ fontSize: 11, color: '#8b949e', marginTop: 8 }}>{new Date(now).toLocaleDateString('en-PH', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} &nbsp; <span style={{ color: '#58a6ff', fontWeight: 500 }}>{new Date(now).toLocaleTimeString('en-PH')}</span></div>
       </div>
