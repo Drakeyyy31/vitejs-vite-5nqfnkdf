@@ -20,14 +20,47 @@ const DEPT_HUE = { META:210, KANAL:42, Helpwave:24, Chargeback:355, DMCA:220, MA
 const dc  = d => `hsl(${DEPT_HUE[d]??210},90%,60%)`;
 const dg  = d => `hsl(${DEPT_HUE[d]??210},90%,60%,0.2)`;
 
-// Shift templates  { label, start: "HH:MM", end: "HH:MM" }
+// ── SHIFT SCHEDULES ──
+// General teams: Morning / Mid / Night
+// DMCA & Chargeback teams: fixed Office hours
 const SHIFT_TEMPLATES = [
-  { label:'Morning',   start:'06:00', end:'14:00' },
-  { label:'Midday',    start:'09:00', end:'17:00' },
-  { label:'Afternoon', start:'13:00', end:'21:00' },
-  { label:'Evening',   start:'16:00', end:'00:00' },
-  { label:'Night',     start:'22:00', end:'06:00' },
+  { label:'Morning', start:'07:00', end:'15:00', overnight:false },
+  { label:'Mid',     start:'15:00', end:'23:00', overnight:false },
+  { label:'Night',   start:'23:00', end:'07:00', overnight:true  },
+  { label:'Office',  start:'09:00', end:'17:00', overnight:false, depts:['DMCA','Chargeback'] },
 ];
+
+// Departments locked to a specific shift
+const DEPT_SHIFT_LOCK = { DMCA:'Office', Chargeback:'Office' };
+
+// Returns the correct shift label for a given dept, or null if agent can choose
+const getLockedShift = dept => DEPT_SHIFT_LOCK[dept] || null;
+
+// Returns shifts available for selection based on dept
+const availableShifts = dept =>
+  getLockedShift(dept)
+    ? SHIFT_TEMPLATES.filter(s => s.label === getLockedShift(dept))
+    : SHIFT_TEMPLATES.filter(s => !s.depts);
+
+// Resolve a shift object by label, fallback to Morning
+const resolveShift = label => SHIFT_TEMPLATES.find(s => s.label === label) || SHIFT_TEMPLATES[0];
+
+// Compute scheduled clock-in timestamp for a given date, handling overnight shifts.
+// For Night shift (23:00 start), scheduled start is 23:00 of the *previous* day
+// when evaluating against a clock-in that happened after midnight.
+const schedStart = (shiftLabel, clockInTs) => {
+  const shift = resolveShift(shiftLabel);
+  const [sh, sm] = shift.start.split(':').map(Number);
+  const ci = new Date(clockInTs);
+  const ref = new Date(clockInTs);
+  ref.setHours(sh, sm, 0, 0);
+  // If overnight shift and clock-in is in the early morning window (00:00–12:00),
+  // the scheduled start was yesterday at shift.start
+  if (shift.overnight && ci.getHours() < 12) {
+    ref.setDate(ref.getDate() - 1);
+  }
+  return ref.getTime();
+};
 
 const STATUS = {
   ACTIVE:  { label:'ON SHIFT',    color:'#22d3a5', pulse:true  },
@@ -312,7 +345,7 @@ export default function App() {
   const [annModal,  setAnnModal] = useState(false);  // mgr announce
 
   // ── form state ──
-  const [reg,    setReg]   = useState({ name:'', pin:'', platform:'META', shift:'Midday' });
+  const [reg,    setReg]   = useState({ name:'', pin:'', platform:'META', shift:'Morning' });
   const [mkey,   setMkey]  = useState('');
   const [logF,   setLogF]  = useState({ name:'', pin:'' });
   const [err,    setErr]   = useState('');
@@ -474,8 +507,8 @@ export default function App() {
       date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
       action:'SWAP_REQUEST', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({
-        from:user.name, to:swapTarget, fromShift:user.shift||'Midday',
-        toShift:agents.find(a=>a.name===swapTarget)?.shift||'Midday',
+        from:user.name, to:swapTarget, fromShift:user.shift||'Morning',
+        toShift:agents.find(a=>a.name===swapTarget)?.shift||'Morning',
         note:swapNote, status:'pending'
       })
     });
@@ -573,10 +606,7 @@ export default function App() {
       const r=recs[agent.name]||{}, ab=r.onBreak?(now-(r.breakStart||now)):0;
       const totB=tb+(r.breakUsedMs||0)+ab, sMs=ci?((co||now)-ci):0, nMs=Math.max(0,sMs-totB);
       const otMs=Math.max(0,nMs-SHIFT_GOAL);
-      const shift=SHIFT_TEMPLATES.find(s=>s.label===agent.shift)||SHIFT_TEMPLATES[1];
-      const [sh,sm]=shift.start.split(':').map(Number);
-      const schStart=new Date(); schStart.setHours(sh,sm,0,0);
-      const lateMs=ci?Math.max(0,ci-(schStart.getTime()+LATE_GRACE)):0;
+      const lateMs=ci?Math.max(0,ci-(schedStart(agent.shift||'Morning',ci)+LATE_GRACE)):0;
       return { ...agent, ci, co, totB, sMs, nMs, otMs, tl,
         status:deriveStatus(logs,agent.name,r,agent.role==='Manager'),
         bOvr:totB>BREAK_MAX, sPct:Math.min(nMs/SHIFT_GOAL*100,100),
@@ -604,10 +634,8 @@ export default function App() {
         });
         const co=sorted.find(l=>l.action==='clockOut')?.timestamp;
         if(ci){
-          const shift=SHIFT_TEMPLATES.find(s=>s.label===agent.shift)||SHIFT_TEMPLATES[1];
-          const [sh,sm]=shift.start.split(':').map(Number);
-          const schStart=new Date(ci); schStart.setHours(sh,sm,0,0);
-          if(ci>schStart.getTime()+LATE_GRACE) lateDays++;
+          const lateThresh = schedStart(agent.shift||'Morning', ci) + LATE_GRACE;
+          if(ci > lateThresh) lateDays++;
           const sMs=co?co-ci:0; totalNet+=Math.max(0,sMs-tb); totalBreak+=tb;
         } else missedDays++;
       });
@@ -641,7 +669,7 @@ export default function App() {
     agents.filter(a =>
       a.status==='active' && a.role!=='Manager' &&
       a.name!==user?.name &&
-      (a.shift||'Midday')===(user?.shift||'Midday')
+      (a.shift||'Morning')===(user?.shift||'Morning')
     ), [agents, user]);
 
   const exportCSV = () => {
@@ -714,16 +742,32 @@ export default function App() {
               <input className="inp gap" type="password" placeholder="Min 4 characters" autoComplete="new-password"
                 onChange={e=>setReg({...reg,pin:e.target.value})}/>
               <label className="lbl">DEPARTMENT</label>
-              <select className="inp gap" onChange={e=>setReg({...reg,platform:e.target.value})}>
+              <select className="inp gap" onChange={e=>{
+                const dept = e.target.value;
+                const locked = getLockedShift(dept);
+                setReg({...reg, platform:dept, shift: locked || reg.shift });
+              }}>
                 {Object.keys(DEPT_HUE).map(p=><option key={p} value={p}>{p}</option>)}
               </select>
-              {reg.platform!=='MANAGER'&&<>
-                <label className="lbl">DEFAULT SHIFT</label>
-                <select className="inp" style={{marginBottom:reg.platform==='MANAGER'?14:20}}
-                  onChange={e=>setReg({...reg,shift:e.target.value})}>
-                  {SHIFT_TEMPLATES.map(s=><option key={s.label} value={s.label}>{s.label} ({s.start}–{s.end})</option>)}
-                </select>
-              </>}
+              {reg.platform!=='MANAGER'&&(
+                getLockedShift(reg.platform) ? (
+                  <div className="alert aok" style={{marginBottom:16}}>
+                    🕘 Shift auto-assigned: <strong>Office (9:00 AM – 5:00 PM)</strong> for {reg.platform} team
+                  </div>
+                ) : (
+                  <>
+                    <label className="lbl">SHIFT SCHEDULE</label>
+                    <select className="inp" style={{marginBottom:20}}
+                      value={reg.shift}
+                      onChange={e=>setReg({...reg,shift:e.target.value})}>
+                      {availableShifts(reg.platform).map(s=>(
+                        <option key={s.label} value={s.label}>
+                          {s.label} ({s.start} – {s.end}{s.overnight?' +1':''})</option>
+                      ))}
+                    </select>
+                  </>
+                )
+              )}
               {reg.platform==='MANAGER'&&<>
                 <label className="lbl" style={{marginTop:2}}>ACTIVATION KEY</label>
                 <input className="inp" style={{marginBottom:20}} type="password"
@@ -784,9 +828,14 @@ export default function App() {
                     <div style={{fontSize:11,letterSpacing:2,color:'var(--sub)',fontFamily:'var(--mono)'}}>SESSION</div>
                     <div style={{fontSize:21,fontWeight:800,marginTop:3,letterSpacing:-.5}}>{user.name}</div>
                     <div style={{fontSize:11,color:dc(user.platform),marginTop:2,fontFamily:'var(--mono)',letterSpacing:1}}>◆ {user.platform}</div>
-                    {user.shift&&<div style={{fontSize:10,color:'var(--sub)',marginTop:2,fontFamily:'var(--mono)'}}>
-                      {user.shift} shift · {SHIFT_TEMPLATES.find(s=>s.label===user.shift)?.start}–{SHIFT_TEMPLATES.find(s=>s.label===user.shift)?.end}
-                    </div>}
+                    {user.shift&&(()=>{
+                      const sh = resolveShift(user.shift);
+                      return (
+                        <div style={{fontSize:10,color:'var(--sub)',marginTop:2,fontFamily:'var(--mono)'}}>
+                          {sh.label.toUpperCase()} SHIFT · {sh.start} – {sh.end}{sh.overnight?' (+1 day)':''}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <Chip color={agentSt.color}><Dot color={agentSt.color} pulse={agentSt.pulse}/> {agentSt.label}</Chip>
                 </div>
@@ -982,7 +1031,7 @@ export default function App() {
                       </Ring>
                       <div style={{flex:1,minWidth:0}}>
                         <div className="an">{a.name}</div>
-                        <div className="ad" style={{color:dc(a.platform)}}>◆ {a.platform} · {a.shift||'Midday'}</div>
+                        <div className="ad" style={{color:dc(a.platform)}}>◆ {a.platform} · {resolveShift(a.shift||'Morning').label} ({resolveShift(a.shift||'Morning').start}–{resolveShift(a.shift||'Morning').end})</div>
                         {a.ci&&<div style={{fontSize:10,color:'var(--sub)',fontFamily:'var(--mono)',marginTop:2}}>
                           IN {new Date(a.ci).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})}
                           {a.lateMs>0&&<span style={{color:'var(--amber)',marginLeft:6}}>⚠ {fmtS(a.lateMs)} late</span>}
@@ -1211,14 +1260,19 @@ export default function App() {
                 <Glass>
                   <div style={{fontWeight:800,fontSize:14,marginBottom:16}}>Shift Breakdown</div>
                   {SHIFT_TEMPLATES.map(shift=>{
-                    const inShift=agents.filter(a=>a.status==='active'&&(a.shift||'Midday')===shift.label);
+                    const inShift=agents.filter(a=>a.status==='active'&&(a.shift||'Morning')===shift.label);
                     if(!inShift.length)return null;
                     return(
-                      <div key={shift.label} style={{marginBottom:14}}>
-                        <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+                      <div key={shift.label} style={{marginBottom:16}}>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,flexWrap:'wrap',gap:6}}>
                           <div>
-                            <span style={{fontWeight:700,fontSize:13}}>{shift.label}</span>
-                            <span style={{fontSize:11,color:'var(--sub)',fontFamily:'var(--mono)',marginLeft:8}}>{shift.start} – {shift.end}</span>
+                            <span style={{fontWeight:700,fontSize:14}}>{shift.label} Shift</span>
+                            <span style={{fontSize:11,color:'var(--sub)',fontFamily:'var(--mono)',marginLeft:8}}>
+                              {shift.start} – {shift.end}{shift.overnight?' (+1 day)':''}
+                            </span>
+                            {shift.depts&&<span style={{fontSize:10,color:dc(shift.depts[0]),fontFamily:'var(--mono)',marginLeft:8}}>
+                              ({shift.depts.join(', ')} team)
+                            </span>}
                           </div>
                           <Chip color="var(--blue)">{inShift.length} agent{inShift.length!==1?'s':''}</Chip>
                         </div>
@@ -1269,7 +1323,9 @@ export default function App() {
                     <div key={a.name} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'13px 0',borderBottom:'1px solid rgba(255,255,255,.05)',gap:10,flexWrap:'wrap'}}>
                       <div>
                         <div style={{fontWeight:700}}>{a.name}</div>
-                        <div style={{fontSize:10,color:dc(a.platform),fontFamily:'var(--mono)',letterSpacing:1,marginTop:3}}>{a.platform} · {a.shift||'Midday'}</div>
+                        <div style={{fontSize:10,color:dc(a.platform),fontFamily:'var(--mono)',letterSpacing:1,marginTop:3}}>
+                          {a.platform} · {resolveShift(a.shift||'Morning').label} ({resolveShift(a.shift||'Morning').start}–{resolveShift(a.shift||'Morning').end})
+                        </div>
                       </div>
                       <button className="btn bt" style={{fontSize:11}} onClick={async()=>{
                         if(!sal)return alert('Assign salary first.');
@@ -1294,7 +1350,9 @@ export default function App() {
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:18,flexWrap:'wrap',gap:8}}>
               <div>
                 <div style={{fontWeight:800,fontSize:19,letterSpacing:-.5}}>{modal.name}</div>
-                <div style={{fontSize:10,color:dc(modal.platform),letterSpacing:1,marginTop:3,fontFamily:'var(--mono)'}}>◆ {modal.platform} · {modal.shift||'Midday'}</div>
+                <div style={{fontSize:10,color:dc(modal.platform),letterSpacing:1,marginTop:3,fontFamily:'var(--mono)'}}>
+                  ◆ {modal.platform} · {resolveShift(modal.shift||'Morning').label} ({resolveShift(modal.shift||'Morning').start}–{resolveShift(modal.shift||'Morning').end})
+                </div>
               </div>
               <Chip color={modal.status.color}><Dot color={modal.status.color} pulse={modal.status.pulse}/>{modal.status.label}</Chip>
             </div>
@@ -1337,11 +1395,19 @@ export default function App() {
           <div className="modal" onClick={e=>e.stopPropagation()}>
             <div className="drag"/>
             <div style={{fontWeight:800,fontSize:19,marginBottom:4}}>Request Shift Swap</div>
-            <div style={{fontSize:11,color:'var(--sub)',fontFamily:'var(--mono)',letterSpacing:2,marginBottom:20}}>SAME SHIFT · MANAGER APPROVAL REQUIRED</div>
+            <div style={{fontSize:11,color:'var(--sub)',fontFamily:'var(--mono)',letterSpacing:2,marginBottom:8}}>SAME SHIFT · MANAGER APPROVAL REQUIRED</div>
+            {user&&(()=>{
+              const sh = resolveShift(user.shift||'Morning');
+              return (
+                <div className="alert aok" style={{marginBottom:16}}>
+                  Your shift: <strong>{sh.label} ({sh.start} – {sh.end}{sh.overnight?' +1 day':''})</strong>
+                </div>
+              );
+            })()}
 
             {swapEligible.length===0?(
               <div className="alert awn" style={{marginBottom:16}}>
-                No agents on the same shift ({user?.shift||'Midday'}) are available to swap with right now.
+                No other agents are on the {resolveShift(user?.shift||'Morning').label} shift ({resolveShift(user?.shift||'Morning').start}–{resolveShift(user?.shift||'Morning').end}) right now.
               </div>
             ):(
               <>
