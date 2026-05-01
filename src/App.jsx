@@ -25,16 +25,9 @@ export default function AftersalesApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
 
-  // Registration & Approval States
   const [regForm, setRegForm] = useState({ name: '', pin: '', platform: 'META' });
   const [activationKeyInput, setActivationKeyInput] = useState('');
   const [approvalSalary, setApprovalSalary] = useState('');
-  
-  // Agent Swap Request States
-  const [swapPartner, setSwapPartner] = useState('');
-  const [myNewOff, setMyNewOff] = useState('');
-  const [partnerNewOff, setPartnerNewOff] = useState('');
-  const [isRequestingSwap, setIsRequestingSwap] = useState(false);
   
   const [loginForm, setLoginForm] = useState({ name: '', pin: '' });
   const [filterDate, setFilterDate] = useState(fmtInputDate(Date.now()));
@@ -72,20 +65,47 @@ export default function AftersalesApp() {
     setError('');
     if (!regForm.name || regForm.pin.length < 4) return setError("Fill all fields (PIN min 4 chars)");
     
-    // GUARD: Check if username already exists
     const exists = dynamicAgents.some(a => a.name.toLowerCase() === regForm.name.toLowerCase().trim());
-    if (exists) return setError("User already created. Contact Drakeyyy or Egar.");
+    if (exists) return setError("User already created.");
 
-    if (regForm.platform === 'MANAGER' && activationKeyInput !== MANAGER_ACTIVATION_KEY) return setError("Invalid Activation Key.");
-    
     setIsLoading(true);
-    const finalData = { ...regForm, role: regForm.platform === 'MANAGER' ? 'Manager' : 'Agent' };
-    const payload = { date: fmtDate(Date.now()), time: fmt(Date.now()), action: 'USER_REGISTER', agent: regForm.name.trim(), device: JSON.stringify(finalData), timestamp: Date.now() };
+    
+    // Logic: If registering as Manager with correct key, set status to active immediately
+    const isManagerBypass = regForm.platform === 'MANAGER' && activationKeyInput === MANAGER_ACTIVATION_KEY;
+    
+    if (regForm.platform === 'MANAGER' && activationKeyInput !== MANAGER_ACTIVATION_KEY) {
+        setIsLoading(false);
+        return setError("Invalid Manager Activation Key.");
+    }
+
+    const finalData = { 
+        ...regForm, 
+        role: regForm.platform === 'MANAGER' ? 'Manager' : 'Agent',
+        salary: regForm.platform === 'MANAGER' ? 600 : 0 // Default manager pay set on bypass
+    };
+
+    const payload = { 
+        date: fmtDate(Date.now()), 
+        time: fmt(Date.now()), 
+        action: isManagerBypass ? 'USER_APPROVE' : 'USER_REGISTER', 
+        agent: regForm.name.trim(), 
+        device: JSON.stringify(finalData), 
+        timestamp: Date.now() 
+    };
     
     try {
         await fetch(SHEETS_WEBHOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
-        setSuccess("Registration request sent!");
-        setTimeout(() => { setView('landing'); setSuccess(''); }, 3000);
+        setSuccess(isManagerBypass ? "Manager Portal Activated! Logging you in..." : "Registration request sent!");
+        
+        if (isManagerBypass) {
+            setTimeout(() => {
+                setLoggedInUser({ ...finalData, status: 'active' });
+                setView('mgrPortal');
+                setSuccess('');
+            }, 2000);
+        } else {
+            setTimeout(() => { setView('landing'); setSuccess(''); }, 3000);
+        }
     } catch (e) { setError("Network error. Try again."); }
     setIsLoading(false);
   };
@@ -118,7 +138,6 @@ export default function AftersalesApp() {
     setTimeout(() => setSuccess(''), 4000);
   };
 
-  // ── RENDER COMPONENT ──
   return (
     <div style={{ minHeight: '100vh', background: '#0d1117', color: '#e6edf3', fontFamily: 'sans-serif', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '40px 20px' }}>
       
@@ -132,7 +151,6 @@ export default function AftersalesApp() {
         <div style={{ fontSize: 12, color: '#58a6ff', marginTop: 5 }}>{new Date(now).toLocaleTimeString('en-PH')}</div>
       </div>
 
-      {/* ── LANDING VIEW ── */}
       {view === 'landing' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 15, width: 300 }}>
           <button onClick={() => setView('login')} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>LOGIN</button>
@@ -140,7 +158,6 @@ export default function AftersalesApp() {
         </div>
       )}
 
-      {/* ── REGISTER VIEW ── */}
       {view === 'register' && (
         <div style={cardStyle}>
           <h2 style={{ marginTop: 0 }}>Onboarding</h2>
@@ -151,8 +168,8 @@ export default function AftersalesApp() {
           </select>
           {regForm.platform === 'MANAGER' && <input type="password" placeholder="Activation Key" disabled={isLoading} onChange={e => setActivationKeyInput(e.target.value)} style={inputStyle} />}
           
-          <button onClick={handleRegister} disabled={isLoading} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff', opacity: isLoading ? 0.6 : 1 }}>
-            {isLoading ? "PROCESSING..." : "SUBMIT REQUEST"}
+          <button onClick={handleRegister} disabled={isLoading} style={{ ...btnStyle, width: '100%', background: '#238636', color: '#fff' }}>
+            {isLoading ? "VERIFYING..." : "SUBMIT REQUEST"}
           </button>
           
           <button onClick={() => setView('landing')} disabled={isLoading} style={{ ...btnStyle, width: '100%', background: 'transparent', color: '#8b949e', marginTop: 10 }}>Back</button>
@@ -161,7 +178,6 @@ export default function AftersalesApp() {
         </div>
       )}
 
-      {/* ── LOGIN VIEW ── */}
       {view === 'login' && (
         <div style={cardStyle}>
           <h2>Sign-In</h2>
@@ -175,26 +191,20 @@ export default function AftersalesApp() {
         </div>
       )}
 
-      {/* ── AGENT PORTAL ── */}
       {view === 'agentPortal' && (
         <div style={{ width: '100%', maxWidth: 450 }}>
           <div style={cardStyle}>
             <h3>Hello, {loggedInUser.name}</h3>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-               <button onClick={() => handleAction('clockIn')} disabled={isLoading} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>
-                  {isLoading ? "..." : "CLOCK IN"}
-               </button>
-               <button onClick={() => handleAction('clockOut')} disabled={isLoading} style={{ ...btnStyle, background: '#6e40c9', color: '#fff' }}>
-                  {isLoading ? "..." : "CLOCK OUT"}
-               </button>
+               <button onClick={() => handleAction('clockIn')} disabled={isLoading} style={{ ...btnStyle, background: '#238636', color: '#fff' }}>CLOCK IN</button>
+               <button onClick={() => handleAction('clockOut')} disabled={isLoading} style={{ ...btnStyle, background: '#6e40c9', color: '#fff' }}>CLOCK OUT</button>
             </div>
             {success && <p style={{ color: '#4ade80', textAlign: 'center', marginTop: 15 }}>{success}</p>}
           </div>
-          <button onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', color: '#f87171', marginTop: 20 }}>Logout</button>
+          <button onClick={() => { setLoggedInUser(null); setView('landing'); }} style={{ width: '100%', background: 'transparent', color: '#f87171', marginTop: 20 }}>Logout</button>
         </div>
       )}
 
-      {/* ── MANAGER PORTAL ── */}
       {view === 'mgrPortal' && (
         <div style={{ width: '100%', maxWidth: 1000 }}>
           <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
@@ -222,15 +232,13 @@ export default function AftersalesApp() {
               {dynamicAgents.filter(a => a.status === 'pending').map((a, i) => (
                 <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: 15, borderBottom: '1px solid #30363d' }}>
                   <span>{a.name} ({a.platform})</span>
-                  <button onClick={() => handleApproveUser(a)} disabled={isLoading} style={{ ...btnStyle, background: '#238636', color: '#fff', padding: '5px 15px' }}>
-                     {isLoading ? "WAIT..." : "APPROVE"}
-                  </button>
+                  <button onClick={() => handleApproveUser(a)} disabled={isLoading} style={{ ...btnStyle, background: '#238636', color: '#fff', padding: '5px 15px' }}>APPROVE</button>
                 </div>
               ))}
               {dynamicAgents.filter(a => a.status === 'pending').length === 0 && <p style={{textAlign: 'center', color: '#8b949e'}}>No pending requests.</p>}
             </div>
           )}
-          <button onClick={() => setView('landing')} style={{ width: '100%', background: 'transparent', color: '#f87171', marginTop: 20 }}>Close Command Center</button>
+          <button onClick={() => { setLoggedInUser(null); setView('landing'); }} style={{ width: '100%', background: 'transparent', color: '#f87171', marginTop: 20 }}>Close Command Center</button>
         </div>
       )}
     </div>
