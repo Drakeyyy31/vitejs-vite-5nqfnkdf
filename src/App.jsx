@@ -1,54 +1,53 @@
 import { useState, useEffect } from 'react';
 
+// Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6
 const AGENTS = [
-  { name: 'Robert', pin: '7342' },
-  { name: 'Mary', pin: '5819' },
-  { name: 'Eli', pin: '2674' },
-  { name: 'Art', pin: '9031' },
-  { name: 'Giah', pin: '4587' },
-  { name: 'Gio', pin: '1263' },
-  { name: 'Jon', pin: '8495' },
-  { name: 'Koko', pin: '3726' },
-  { name: 'Porsha', pin: '6148' },
-  { name: 'Hawuki', pin: '9507' },
-  { name: 'John', pin: '2893' },
-  { name: 'Eunice', pin: '4361' },
-  { name: 'Juan', pin: '7014' },
-  { name: 'Bulad', pin: '5682' },
-  { name: 'Charles', pin: '8237' },
-  { name: 'Lanie', pin: '1954' },
-  { name: 'Kat', pin: '6720' },
-  { name: 'Aruchi', pin: '3485' },
-  { name: 'Pea', pin: '9163' },
-  { name: 'Venellope', pin: '2748' },
-  { name: 'Seyan', pin: '5091' },
-  { name: 'Marc', pin: '8364' },
-  { name: 'Icho', pin: '1537' },
-  { name: 'Kemuel', pin: '6892' },
-  { name: 'Dani', pin: '4015' },
-  { name: 'Jiro', pin: '7483' },
-  { name: 'Chin', pin: '3256' },
-  { name: 'Ryujo', pin: '9740' },
-  { name: 'Kate', pin: '2167' },
-  { name: 'Chris', pin: '5834' },
-  { name: 'Trellix', pin: '8609' },
-  { name: 'Luna', pin: '1472' },
-  { name: 'Daniel', pin: '6325' },
-  { name: 'Juliana', pin: '3958' },
-  { name: 'Kisses', pin: '7241' },
-  { name: 'Aljane', pin: '4863' },
-  { name: 'Drakeyyy', pin: '0731' },
-  { name: 'Egar', pin: '1234' },
-  { name: 'Lasgna', pin: '1234' },
-  { name: 'Sinclair', pin: '1234' }
+  // ── 7am-3pm ──
+  { name: 'Jon', pin: '8495', shiftStart: 7, dayOff: 0 },
+  { name: 'Porsha', pin: '6148', shiftStart: 7, dayOff: 6 },
+  { name: 'Hawuki', pin: '9507', shiftStart: 7, dayOff: 1 },
+  { name: 'Chris', pin: '5834', shiftStart: 7, dayOff: 5 },
+  { name: 'Icho', pin: '1537', shiftStart: 7, dayOff: 3 },
+  { name: 'Chin', pin: '3256', shiftStart: 7, dayOff: 4 },
+  { name: 'Marc', pin: '8364', shiftStart: 7, dayOff: 2 },
+  { name: 'Art', pin: '9031', shiftStart: 7, dayOff: 2 },
+  { name: 'Charles', pin: '8237', shiftStart: 7, dayOff: 1 },
+  { name: 'Luna', pin: '1472', shiftStart: 7, dayOff: 3 },
+
+  // ── 3pm-11pm ──
+  { name: 'Giah', pin: '4587', shiftStart: 15, dayOff: 4 },
+  { name: 'Bulad', pin: '5682', shiftStart: 15, dayOff: 5 },
+  { name: 'Trellix', pin: '8609', shiftStart: 15, dayOff: 0 },
+  { name: 'Aljane', pin: '4863', shiftStart: 15, dayOff: 2 },
+  { name: 'Koko', pin: '3726', shiftStart: 15, dayOff: 2 },
+  { name: 'Aruchi', pin: '3485', shiftStart: 15, dayOff: 1 },
+  { name: 'Seyan', pin: '5091', shiftStart: 15, dayOff: 4 },
+  { name: 'John', pin: '2893', shiftStart: 15, dayOff: 5 },
+  { name: 'Kisses', pin: '7241', shiftStart: 15, dayOff: 2 },
+  { name: 'Dani', pin: '4015', shiftStart: 15, dayOff: 0 },
+  { name: 'Ryujo', pin: '9740', shiftStart: 15, dayOff: 1 },
+  { name: 'Jiro', pin: '7483', shiftStart: 15, dayOff: 6 },
+
+  // ── 11pm-7am ──
+  { name: 'Eunice', pin: '4361', shiftStart: 23, dayOff: 2 },
+  { name: 'Kemuel', pin: '6892', shiftStart: 23, dayOff: 3 },
+  { name: 'Daniel', pin: '6325', shiftStart: 23, dayOff: 5 },
+  { name: 'Juliana', pin: '3958', shiftStart: 23, dayOff: 6 },
+  { name: 'Venellope', pin: '2748', shiftStart: 23, dayOff: 5 },
+  { name: 'Pea', pin: '9163', shiftStart: 23, dayOff: 3 },
+  { name: 'Lanie', pin: '1954', shiftStart: 23, dayOff: 0 },
+  { name: 'Gio', pin: '1263', shiftStart: 23, dayOff: 0 },
+  { name: 'Kate', pin: '2167', shiftStart: 23, dayOff: 5 },
+  { name: 'Juan', pin: '7014', shiftStart: 23, dayOff: 6 },
+  { name: 'Kat', pin: '6720', shiftStart: 23, dayOff: 2 }
 ];
 
 const MANAGERS = [
-  { name: 'Suley', password: 'fndr-suley-2026' },
-  { name: 'Egar', password: 'mgr-Egar-2026' },
-  { name: 'Lasgna', password: 'mgr-Lasgna-2026' },
-  { name: 'Sinclair', password: 'mgr-Sinclair-2026' },
-  { name: 'Drakeyyy', password: 'mgr-Drakeyyy-2026' }
+  { name: 'Suley', password: 'fndr-suley-2026', dayOff: null },
+  { name: 'Egar', password: 'mgr-Egar-2026', dayOff: 0 },
+  { name: 'Lasgna', password: 'mgr-Lasgna-2026', dayOff: 4 },
+  { name: 'Sinclair', password: 'mgr-Sinclair-2026', dayOff: 6 },
+  { name: 'Drakeyyy', password: 'mgr-Drakeyyy-2026', dayOff: 3 }
 ];
 
 const BREAK_LIMIT_MS = 60 * 60 * 1000;
@@ -93,6 +92,41 @@ async function logToSheets(payload) {
   }
 }
 
+// ── Smart Tracker Functions ──
+const getLateness = (agent, ts) => {
+  const d = new Date(ts);
+  if (d.getDay() === agent.dayOff) return "DAY OFF";
+
+  let expected = new Date(ts);
+  expected.setHours(agent.shiftStart, 0, 0, 0);
+
+  // If 11pm shift and clocking in past midnight, shift belongs to yesterday
+  if (agent.shiftStart === 23 && d.getHours() < 12) {
+    expected.setDate(expected.getDate() - 1);
+  }
+
+  // 5 minutes grace period
+  const graceLimit = expected.getTime() + (5 * 60 * 1000);
+
+  if (ts > graceLimit) return "LATE";
+  return "ON TIME";
+};
+
+const getQuotaStatus = (agent, ts, totalWorkedMs) => {
+  const isDayOff = new Date(ts).getDay() === agent.dayOff;
+  if (isDayOff) return `REST DAY OT: ${fmtDur(totalWorkedMs)}`;
+
+  const quota = 8 * 60 * 60 * 1000; // 8 hours in ms
+  if (totalWorkedMs >= quota) {
+    const ot = totalWorkedMs - quota;
+    if (ot < 60000) return "QUOTA MET"; // Ignore seconds
+    return `OT: ${fmtDur(ot)}`;
+  } else {
+    const ut = quota - totalWorkedMs;
+    return `UNDERTIME: ${fmtDur(ut)}`;
+  }
+};
+
 const Badge = ({ status }) => {
   const map = {
     idle: ['#64748b', 'IDLE'],
@@ -120,17 +154,30 @@ const Badge = ({ status }) => {
   );
 };
 
-const actionLabel = {
-  clockIn: '▶ Clock In',
-  clockOut: '⏹ Clock Out',
-  breakStart: '☕ Break Start',
-  breakEnd: '💼 Break End',
-};
-const actionColor = {
-  clockIn: '#4ade80',
-  clockOut: '#a78bfa',
-  breakStart: '#fbbf24',
-  breakEnd: '#60a5fa',
+// Custom renderer for the logs table to style tags correctly
+const renderAction = (actionStr) => {
+  if (typeof actionStr !== 'string') return actionStr;
+
+  if (actionStr.startsWith('clockIn')) {
+    const match = actionStr.match(/\[(.*?)\]/);
+    const tag = match ? ` [${match[1]}]` : '';
+    let color = '#4ade80';
+    if (tag.includes('LATE')) color = '#f87171';
+    if (tag.includes('DAY OFF')) color = '#a78bfa';
+    return <span style={{ color, fontWeight: 600 }}>▶ Clock In{tag}</span>;
+  }
+  if (actionStr.startsWith('clockOut')) {
+    const match = actionStr.match(/\[(.*?)\]/);
+    const tag = match ? ` [${match[1]}]` : '';
+    let color = '#a78bfa';
+    if (tag.includes('UNDERTIME')) color = '#f87171';
+    if (tag.includes('OT')) color = '#fbbf24';
+    return <span style={{ color, fontWeight: 600 }}>⏹ Clock Out{tag}</span>;
+  }
+  if (actionStr === 'breakStart') return <span style={{ color: '#fbbf24', fontWeight: 600 }}>☕ Break Start</span>;
+  if (actionStr === 'breakEnd') return <span style={{ color: '#60a5fa', fontWeight: 600 }}>💼 Break End</span>;
+  
+  return <span style={{ color: '#e6edf3', fontWeight: 600 }}>{actionStr}</span>;
 };
 
 export default function AttendanceApp() {
@@ -144,11 +191,9 @@ export default function AttendanceApp() {
   const [filterAgent, setFilterAgent] = useState('all');
   const [filterDate, setFilterDate] = useState('');
 
-  // Global logs state
   const [globalLogs, setGlobalLogs] = useState([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
 
-  // Manager auth state
   const [mgrAuthed, setMgrAuthed] = useState(false);
   const [mgrInput, setMgrInput] = useState('');
   const [mgrError, setMgrError] = useState('');
@@ -174,7 +219,6 @@ export default function AttendanceApp() {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Fetch Global Logs when Log tab opens
   useEffect(() => {
     if (tab === 'log') {
       const fetchLogs = async () => {
@@ -189,7 +233,6 @@ export default function AttendanceApp() {
         }
         setIsLoadingLogs(false);
       };
-      
       fetchLogs();
     }
   }, [tab]);
@@ -235,6 +278,7 @@ export default function AttendanceApp() {
     const ts = Date.now();
     const today = new Date().toDateString();
     let next = { ...rec };
+    let logActionStr = action; // Default for Sheets log
 
     if (action === 'clockIn') {
       if (rec.date && rec.date !== today) {
@@ -243,6 +287,10 @@ export default function AttendanceApp() {
         setError('You already have an active session.');
         return;
       }
+      
+      const lateness = getLateness(agent, ts);
+      logActionStr = `clockIn [${lateness}]`;
+
       next = {
         ...next,
         clockIn: ts,
@@ -251,8 +299,10 @@ export default function AttendanceApp() {
         onBreak: false,
         breakUsedMs: 0,
         breakStart: null,
+        latenessStr: lateness
       };
-      setSuccess(`✅ Clocked in at ${fmt(ts)}`);
+      setSuccess(`✅ Clocked in at ${fmt(ts)} [${lateness}]`);
+      
     } else if (action === 'breakStart') {
       if (status !== 'clocked_in') {
         setError('Must be clocked in to start break.');
@@ -264,6 +314,7 @@ export default function AttendanceApp() {
       }
       next = { ...next, onBreak: true, breakStart: ts };
       setSuccess(`☕ Break started — ${fmtDur(breakLeft(rec))} remaining`);
+      
     } else if (action === 'breakEnd') {
       if (status !== 'on_break') {
         setError('You are not on break.');
@@ -271,39 +322,41 @@ export default function AttendanceApp() {
       }
       const used = (rec.breakUsedMs || 0) + (ts - rec.breakStart);
       next = { ...next, onBreak: false, breakStart: null, breakUsedMs: used };
-      setSuccess(
-        `💼 Back to work — ${fmtDur(breakLeft({ ...next }))} break left`
-      );
+      setSuccess(`💼 Back to work — ${fmtDur(breakLeft({ ...next }))} break left`);
+      
     } else if (action === 'clockOut') {
       if (status !== 'clocked_in' && status !== 'on_break') {
         setError('You are not clocked in.');
         return;
       }
+      let used = rec.breakUsedMs || 0;
       if (rec.onBreak && rec.breakStart) {
-        const used = (rec.breakUsedMs || 0) + (ts - rec.breakStart);
+        used += (ts - rec.breakStart);
         next = { ...next, onBreak: false, breakStart: null, breakUsedMs: used };
       }
-      next = { ...next, clockOut: ts };
-      setSuccess(
-        `🏁 Done! Total worked: ${fmtDur(
-          ts - rec.clockIn - (next.breakUsedMs || 0)
-        )}`
-      );
+      
+      const totalWorkedMs = ts - rec.clockIn - used;
+      const quotaStatus = getQuotaStatus(agent, ts, totalWorkedMs);
+      logActionStr = `clockOut [${quotaStatus}]`;
+
+      next = { ...next, clockOut: ts, quotaStr: quotaStatus };
+      setSuccess(`🏁 Done! Total worked: ${fmtDur(totalWorkedMs)} [${quotaStatus}]`);
     }
 
     const entry = {
       date: fmtDate(ts),
       time: fmt(ts),
-      action,
+      action: logActionStr, // This goes to Sheets exactly as 'clockIn [LATE]', etc.
       agent: agent.name,
       device: navigator.userAgent.slice(0, 100),
       timestamp: ts,
     };
+    
     next.history = [...(rec.history || []), entry];
     save({ ...records, [agent.name]: next });
     await logToSheets(entry);
     setPin('');
-    setTimeout(() => setSuccess(''), 5000);
+    setTimeout(() => setSuccess(''), 6000); // Extended slightly so they can read the tag
   };
 
   const handleMgrLogin = () => {
@@ -713,17 +766,12 @@ export default function AttendanceApp() {
                 }}
               >
                 {[
-                  ['Clock In', fmt(curRec.clockIn)],
+                  ['Clock In', `${fmt(curRec.clockIn)}`],
                   ['Clock Out', fmt(curRec.clockOut)],
+                  ['Lateness', curRec.latenessStr || '—'],
+                  ['Quota Status', curRec.quotaStr || '—'],
                   ['Break Used', fmtDur(curRec.breakUsedMs)],
-                  [
-                    'Total Worked',
-                    fmtDur(
-                      curRec.clockOut -
-                        curRec.clockIn -
-                        (curRec.breakUsedMs || 0)
-                    ),
-                  ],
+                  ['Total Worked', fmtDur(curRec.clockOut - curRec.clockIn - (curRec.breakUsedMs || 0))]
                 ].map(([k, v]) => (
                   <div
                     key={k}
@@ -745,9 +793,10 @@ export default function AttendanceApp() {
                     </div>
                     <div
                       style={{
-                        color: '#e6edf3',
+                        color: v.includes('LATE') || v.includes('UNDER') ? '#f87171' : 
+                               v.includes('OT') ? '#fbbf24' : '#e6edf3',
                         fontWeight: 500,
-                        fontSize: 13,
+                        fontSize: 12,
                       }}
                     >
                       {v}
@@ -885,42 +934,17 @@ export default function AttendanceApp() {
                     className="row-hover"
                     style={{ borderBottom: '1px solid #21262d' }}
                   >
-                    <td
-                      style={{
-                        padding: '10px 16px',
-                        color: '#8b949e',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
+                    <td style={{ padding: '10px 16px', color: '#8b949e', whiteSpace: 'nowrap' }}>
                       {l.date}
                     </td>
-                    <td
-                      style={{
-                        padding: '10px 16px',
-                        color: '#e6edf3',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
+                    <td style={{ padding: '10px 16px', color: '#e6edf3', whiteSpace: 'nowrap' }}>
                       {l.time}
                     </td>
-                    <td
-                      style={{
-                        padding: '10px 16px',
-                        color: '#e6edf3',
-                        fontWeight: 500,
-                      }}
-                    >
+                    <td style={{ padding: '10px 16px', color: '#e6edf3', fontWeight: 500 }}>
                       {l.agent}
                     </td>
                     <td style={{ padding: '10px 16px', whiteSpace: 'nowrap' }}>
-                      <span
-                        style={{
-                          color: actionColor[l.action] || '#e6edf3',
-                          fontWeight: 600,
-                        }}
-                      >
-                        {actionLabel[l.action] || l.action}
-                      </span>
+                      {renderAction(l.action)}
                     </td>
                     <td
                       style={{
