@@ -547,7 +547,7 @@ export default function AttendanceApp() {
                </button>
              </div>
 
-             {reportData && <textarea readOnly value={reportData} style={{ ...inputBase, width: '100%', height: 200, resize: 'none', fontSize: 11 }} />}
+             {reportData && <textarea readOnly value={reportData} style={{ ...inputBase, width: '100%', minHeight: 450, resize: 'vertical', fontSize: 11 }} />}
           </div>
 
           {/* Shift Swapper */}
