@@ -333,32 +333,48 @@ export default function AttendanceApp() {
       return ts >= startDate.getTime() && ts <= endDate.getTime();
     });
 
-    let latesCount = {};
-    let otRecords = [];
+    let latesByDate = {};
+    let otByDate = {};
     let presentDays = {}; // Map: Agent Name -> Set of dates they clocked in
 
     logsInRange.forEach(l => {
       const dateStr = new Date(l.timestamp).toDateString();
+      
+      // Track Presence
       if (l.action.startsWith('clockIn')) {
         if (!presentDays[l.agent]) presentDays[l.agent] = new Set();
         presentDays[l.agent].add(dateStr);
       }
+      // Track Lates
       if (l.action.includes('LATE')) {
-        latesCount[l.agent] = (latesCount[l.agent] || 0) + 1;
+        if (!latesByDate[dateStr]) latesByDate[dateStr] = [];
+        latesByDate[dateStr].push(l.agent);
       }
+      // Track OT
       if (l.action.includes('[OT:') || l.action.includes('REST DAY OT')) {
         const otStr = l.action.match(/\[(.*?)\]/)?.[1] || 'OT';
-        otRecords.push(`${l.agent} (${dateStr.slice(0,10)}: ${otStr})`);
+        if (!otByDate[dateStr]) otByDate[dateStr] = [];
+        otByDate[dateStr].push(`${l.agent} (${otStr})`);
       }
     });
 
-    // Calculate exact absences by looping through every valid day in the range
-    let absences = [];
+    let latesFormatted = [];
+    let absencesFormatted = [];
+    let otFormatted = [];
     const loopEnd = Math.min(endDate.getTime(), now.getTime()); // Don't check the future
     
+    // Loop through every day in the timeframe to build clean categories
     for (let d = new Date(startDate); d.getTime() <= loopEnd; d.setDate(d.getDate() + 1)) {
       const dStr = d.toDateString();
+      const shortDate = dStr.slice(0,10); // e.g. "Sun Apr 26"
       
+      // 1. Process Lates
+      if (latesByDate[dStr] && latesByDate[dStr].length > 0) {
+        latesFormatted.push(`\n    --- ${shortDate} ---\n    ` + latesByDate[dStr].join('\n    '));
+      }
+
+      // 2. Process Absences
+      let dailyMissing = [];
       AGENTS.forEach(a => {
         const checkDateTs = d.getTime() + 12*60*60*1000; // Noon safety
         if (checkIsDayOff(a.name, checkDateTs)) return; // Skip if it was their rest day
@@ -368,19 +384,26 @@ export default function AttendanceApp() {
 
         const hasClockedIn = presentDays[a.name] && presentDays[a.name].has(dStr);
         if (!hasClockedIn) {
-          absences.push(`${a.name} (${dStr.slice(0,10)})`);
+          dailyMissing.push(a.name);
         }
       });
-    }
 
-    const latesFormatted = Object.entries(latesCount).map(([agent, count]) => `${agent} (x${count})`);
+      if (dailyMissing.length > 0) {
+        absencesFormatted.push(`\n    --- ${shortDate} ---\n    ` + dailyMissing.join('\n    '));
+      }
+
+      // 3. Process OT
+      if (otByDate[dStr] && otByDate[dStr].length > 0) {
+        otFormatted.push(`\n    --- ${shortDate} ---\n    ` + otByDate[dStr].join('\n    '));
+      }
+    }
 
     setReportData(
       `📅 ${title} (${fmtDate(startDate)} - ${fmtDate(Math.min(endDate, now))})\n` +
       `-----------------------------------------\n` +
-      `⚠️ LATES: ${latesFormatted.length > 0 ? latesFormatted.join(', ') : 'None'}\n` +
-      `🚨 ABSENCES: ${absences.length > 0 ? absences.join('\n             ') : 'None'}\n` +
-      `⏱️ OVERTIME: ${otRecords.length > 0 ? otRecords.join('\n             ') : 'None'}\n` +
+      `⚠️ LATES: ${latesFormatted.length > 0 ? latesFormatted.join('') : 'None'}\n` +
+      `🚨 ABSENCES: ${absencesFormatted.length > 0 ? absencesFormatted.join('') : 'None'}\n` +
+      `⏱️ OVERTIME: ${otFormatted.length > 0 ? otFormatted.join('') : 'None'}\n` +
       `-----------------------------------------`
     );
   };
