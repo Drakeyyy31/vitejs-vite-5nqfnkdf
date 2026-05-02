@@ -479,7 +479,40 @@ export default function App() {
 
   useEffect(() => { fetch_(); }, [view, fetch_]);
 
-  // ── ASYNC SERVER-SYNC: re-run rebuild whenever fresh logs arrive ──────────
+  // ── REBUILD SESSION FROM LOGS ────────────────────────────────────────────
+  // Declared here (before the useEffect that depends on it) to avoid
+  // the temporal dead zone — const bindings must be initialised before use.
+  const rebuildSession = useCallback((agentName, sourceLogs) => {
+    const today = todayMs();
+    const todayLogs = [...sourceLogs
+      .filter(l => l.agent === agentName && l.timestamp >= today)]
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (todayLogs.length === 0) return null;
+
+    let clockIn = null, breakUsedMs = 0, breakStart = null, clockedOut = false;
+    for (const l of todayLogs) {
+      if (l.action === 'clockIn') {
+        if (!clockIn || clockedOut) {
+          clockIn = l.timestamp; breakUsedMs = 0; breakStart = null; clockedOut = false;
+        }
+      }
+      if (l.action === 'breakStart' && clockIn && !clockedOut) { breakStart = l.timestamp; }
+      if (l.action === 'breakEnd' && breakStart) {
+        breakUsedMs += l.timestamp - breakStart; breakStart = null;
+      }
+      if (l.action === 'clockOut' && clockIn) { clockedOut = true; breakStart = null; }
+    }
+
+    if (!clockIn) return null;
+
+    const rebuilt = { clockIn, breakUsedMs };
+    if (clockedOut) rebuilt.clockedOut = true;
+    if (breakStart) { rebuilt.onBreak = true; rebuilt.breakStart = breakStart; }
+    return rebuilt;
+  }, []); // eslint-disable-line
+
+    // ── ASYNC SERVER-SYNC: re-run rebuild whenever fresh logs arrive ──────────
   // This backs up the synchronous rebuild in doLogin and also catches changes
   // that happened on another device (e.g. a manager correcting a clock-in).
   useEffect(() => {
@@ -528,44 +561,6 @@ export default function App() {
     else setTimeout(() => setView('landing'), 2500);
     setBusy(false);
   };
-
-  // ── LOGIN ──
-  // ── REBUILD SESSION FROM LOGS (shared between doLogin and the async useEffect) ──
-  const rebuildSession = useCallback((agentName, sourceLogs) => {
-    const today = todayMs();
-    const todayLogs = [...sourceLogs
-      .filter(l => l.agent === agentName && l.timestamp >= today)]
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    if (todayLogs.length === 0) return null;
-
-    // Replay clock events in order.
-    // We take the EARLIEST clockIn of the day as the shift start —
-    // any subsequent clockIn events (from accidental re-logins) are ignored
-    // as long as there was no clockOut between them.
-    let clockIn = null, breakUsedMs = 0, breakStart = null, clockedOut = false;
-    for (const l of todayLogs) {
-      if (l.action === 'clockIn') {
-        // Only reset shift if there was a genuine clockOut before this
-        if (!clockIn || clockedOut) {
-          clockIn = l.timestamp; breakUsedMs = 0; breakStart = null; clockedOut = false;
-        }
-        // else: ignore stray re-clockIn (agent clicked Clock In after logout by mistake)
-      }
-      if (l.action === 'breakStart' && clockIn && !clockedOut) { breakStart = l.timestamp; }
-      if (l.action === 'breakEnd' && breakStart) {
-        breakUsedMs += l.timestamp - breakStart; breakStart = null;
-      }
-      if (l.action === 'clockOut' && clockIn) { clockedOut = true; breakStart = null; }
-    }
-
-    if (!clockIn) return null;
-
-    const rebuilt = { clockIn, breakUsedMs };
-    if (clockedOut) rebuilt.clockedOut = true;
-    if (breakStart) { rebuilt.onBreak = true; rebuilt.breakStart = breakStart; }
-    return rebuilt;
-  }, []); // eslint-disable-line
 
   const doLogin = () => {
     setErr('');
