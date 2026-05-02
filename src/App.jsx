@@ -412,6 +412,11 @@ export default function App() {
   const [annText,    setAnnText]   = useState('');
   const [annUrgent,  setAnnUrgent] = useState(false);
 
+  // ── notifications: track which announcement IDs have been seen by this user ──
+  // Key: 'afs_seen_' + username, Value: array of announcement timestamps (used as IDs)
+  const [seenAnns, setSeenAnns] = useState(() => lsGet(`afs_seen_${lsGet('afs_user')?.name || 'x'}`) || []);
+  const [notifTab, setNotifTab] = useState(false); // notification drawer open
+
   // ── server data ──
   const [swapReqs,   setSwapReqs]   = useState([]);
   const [anns,       setAnns]       = useState([]);
@@ -424,6 +429,34 @@ export default function App() {
   // ── persist ──
   useEffect(() => { lsSet('afs_recs', recs); }, [recs]);
   useEffect(() => { if (user) lsSet('afs_user', user); else lsDel('afs_user'); }, [user]);
+
+  // Keep seenAnns in sync with the logged-in user
+  useEffect(() => {
+    if (user?.name) {
+      const saved = lsGet(`afs_seen_${user.name}`) || [];
+      setSeenAnns(saved);
+    } else {
+      setSeenAnns([]);
+    }
+  }, [user?.name]); // eslint-disable-line
+
+  const markAnnSeen = useCallback((ts) => {
+    setSeenAnns(prev => {
+      if (prev.includes(ts)) return prev;
+      const next = [...prev, ts];
+      if (user?.name) lsSet(`afs_seen_${user.name}`, next);
+      return next;
+    });
+  }, [user?.name]); // eslint-disable-line
+
+  const markAllAnnsSeen = useCallback((annList) => {
+    const tsList = annList.map(a => a.timestamp);
+    setSeenAnns(prev => {
+      const next = [...new Set([...prev, ...tsList])];
+      if (user?.name) lsSet(`afs_seen_${user.name}`, next);
+      return next;
+    });
+  }, [user?.name]); // eslint-disable-line
 
   const showToast = useCallback((msg, kind = 'ok') => {
     setToast({ msg, kind });
@@ -453,7 +486,11 @@ export default function App() {
     if (!clockIn) return null;
 
     const rebuilt = { clockIn, breakUsedMs, pauseUsedMs };
-    if (clockedOut) rebuilt.clockedOut = true;
+    if (clockedOut) {
+      rebuilt.clockedOut = true;
+      const coLog = todayLogs.filter(l => l.action === 'clockOut').pop();
+      if (coLog) rebuilt.clockOutTs = coLog.timestamp;
+    }
     if (breakStart) { rebuilt.onBreak = true; rebuilt.breakStart = breakStart; }
     if (pauseStart) { rebuilt.onPause = true; rebuilt.pauseStart = pauseStart; }
     return rebuilt;
@@ -575,7 +612,7 @@ export default function App() {
     if (type === 'breakEnd')   { nx.onBreak = false; nx.breakUsedMs = (nx.breakUsedMs || 0) + (ts - nx.breakStart); delete nx.breakStart; }
     if (type === 'dutyPause')  { nx.onPause = true; nx.pauseStart = ts; }
     if (type === 'dutyResume') { nx.onPause = false; nx.pauseUsedMs = (nx.pauseUsedMs || 0) + (ts - nx.pauseStart); delete nx.pauseStart; }
-    if (type === 'clockOut')   { nx = { clockedOut: true }; }
+    if (type === 'clockOut')   { nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 }; }
     setRecs(p => ({ ...p, [user.name]: nx }));
     await post({ date: phNowDate(), time: phNowTime(), action: type, agent: user.name, device: proof, timestamp: ts });
     showToast(AL[type] || type);
@@ -637,17 +674,14 @@ export default function App() {
     await fetch_(); setBusy(false);
   };
 
-// ── SESSION CALCS ──
+  // ── SESSION CALCS ──
   // Break IS included in the 8h shift (7h work + 1h break = 8h total).
   // Duty Pause is NOT counted — it extends the shift window.
   const rec       = user ? (recs[user.name] || {}) : {};
-  
-  // FIX: Determine the end point for calculations (use clockOut time if it exists, otherwise use 'now')
-  const endTime   = rec.clockedOut && rec.clockOut ? rec.clockOut : now;
-
   const bMs       = (rec.breakUsedMs || 0) + (rec.onBreak ? (now - rec.breakStart) : 0);
   const pauseMs   = (rec.pauseUsedMs || 0) + (rec.onPause ? (now - rec.pauseStart) : 0);
-  const rawMs     = rec.clockIn ? (endTime - rec.clockIn) : 0; // Use endTime instead of now
+  // Cap elapsed at clockOutTs once clocked out — the timer must stop
+  const rawMs     = rec.clockIn ? ((rec.clockedOut && rec.clockOutTs ? rec.clockOutTs : now) - rec.clockIn) : 0;
   const shMs      = Math.max(0, rawMs - pauseMs);   // elapsed excl. paused time
   const net       = Math.max(0, shMs - bMs);         // actual work time (display)
   const ot        = Math.max(0, shMs - SHIFT_GOAL);
@@ -934,6 +968,22 @@ export default function App() {
                 <Chip color={agentSt.color}><Dot color={agentSt.color} pulse={agentSt.pulse} /> {agentSt.label}</Chip>
               </div>
 
+              {/* SHIFT COMPLETE BANNER */}
+              {rec.clockedOut && rec.clockIn && (
+                <div style={{ padding: '11px 16px', borderRadius: 12, background: 'rgba(100,116,139,.08)', border: '1px solid rgba(100,116,139,.25)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 15 }}>✅</span>
+                    <div>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: 'var(--sub)', letterSpacing: 1 }}>SHIFT COMPLETE</div>
+                      <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>
+                        {phTimeShort(rec.clockIn)} – {rec.clockOutTs ? phTimeShort(rec.clockOutTs) : '?'} · {new Date(rec.clockIn).toLocaleDateString('en-PH', { timeZone: PH_TZ, month: 'short', day: 'numeric' })} · Clock out recorded
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: 'var(--sub)' }}>{fmt(shMs)}</div>
+                </div>
+              )}
+
               {/* SESSION ACTIVE BANNER */}
               {rec.clockIn && !rec.clockedOut && (
                 <div style={{ padding: '11px 16px', borderRadius: 12, background: rec.onPause ? 'rgba(249,115,22,0.08)' : 'rgba(34,211,165,0.07)', border: `1px solid ${rec.onPause ? 'rgba(249,115,22,0.3)' : 'rgba(34,211,165,0.25)'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -952,13 +1002,14 @@ export default function App() {
                 </div>
               )}
 
-              {/* ANNOUNCEMENTS */}
-              {anns.slice(0, 2).map((a, i) => (
-                <div key={i} style={{ padding: '11px 16px', borderRadius: 12, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.25)' : 'rgba(192,132,252,.2)'}` }}>
+              {/* ANNOUNCEMENT BANNERS — only unread, dismissible */}
+              {anns.filter(a => !seenAnns.includes(a.timestamp)).slice(0, 3).map((a) => (
+                <div key={a.timestamp} style={{ padding: '11px 16px', borderRadius: 12, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.25)' : 'rgba(192,132,252,.2)'}` }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                     {a.urgent && <span>🚨</span>}
                     <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'ANNOUNCEMENT'} — {a.from}</span>
-                    <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
+                    <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 8 }}>{a.date} {a.time}</span>
+                    <button onClick={() => markAnnSeen(a.timestamp)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--sub)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px' }} title="Dismiss">✕</button>
                   </div>
                   <div style={{ fontSize: 13, lineHeight: 1.5 }}>{a.text}</div>
                 </div>
@@ -1038,7 +1089,18 @@ export default function App() {
 
                 {/* RIGHT — Quick actions + timeline */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                  <div className="g2sm">
+                  {/* Notification bell with unread badge */}
+                {(() => {
+                  const unread = anns.filter(a => !seenAnns.includes(a.timestamp)).length;
+                  return (
+                    <button style={{ display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'10px 16px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',width:'100%',color:'var(--purple)',fontWeight:700,fontSize:13,fontFamily:'var(--font)',position:'relative' }}
+                      onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
+                      🔔 NOTIFICATIONS
+                      {unread > 0 && <span style={{position:'absolute',top:8,right:12,background:'var(--red)',color:'#fff',borderRadius:'50%',width:18,height:18,display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,fontWeight:700}}>{unread}</span>}
+                    </button>
+                  );
+                })()}
+                <div className="g2sm">
                     <button className="btn bb" style={{ fontSize: 11 }} onClick={() => setSwapModal(true)}>⇄ SWAP SHIFT</button>
                     <button className="btn br" style={{ fontSize: 11 }} onClick={() => setEscalModal(true)}>🚨 ESCALATE</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={() => setMemoModal(true)}>📝 MEMO</button>
@@ -1124,7 +1186,17 @@ export default function App() {
                   {pendingSwaps.length > 0 && <Chip color="var(--amber)">⇄ {pendingSwaps.length} SWAP{pendingSwaps.length !== 1 ? 'S' : ''}</Chip>}
                 </div>
               </div>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                {(() => {
+                  const unread = anns.filter(a => !seenAnns.includes(a.timestamp)).length;
+                  return (
+                    <button style={{ position:'relative',display:'flex',alignItems:'center',gap:6,padding:'10px 14px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',color:'var(--purple)',fontWeight:700,fontSize:12,fontFamily:'var(--font)' }}
+                      onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
+                      🔔 NOTIFS
+                      {unread > 0 && <span style={{position:'absolute',top:6,right:6,background:'var(--red)',color:'#fff',borderRadius:'50%',width:16,height:16,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:700}}>{unread}</span>}
+                    </button>
+                  );
+                })()}
                 <button className="btn bp" style={{ fontSize: 11 }} onClick={() => setAnnModal(true)}>📢 ANNOUNCE</button>
                 <button className="btn bg" style={{ color: 'var(--red)', fontSize: 11 }} onClick={logout}>LOGOUT</button>
               </div>
@@ -1348,7 +1420,7 @@ export default function App() {
                 <Glass>
                   <SectionHead>
                     Broadcast History
-                    <button className="btn bp" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }} onClick={() => setAnnModal(true)}>+ NEW</button>
+                    <button className="btn bp" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }} onClick={() => { setAnnModal(true); markAllAnnsSeen(anns); }}>+ NEW</button>
                   </SectionHead>
                   {anns.length === 0
                     ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontSize: 13 }}>No announcements yet.</div>
@@ -1564,6 +1636,43 @@ export default function App() {
             </div>
             <button className={`btn bw ${annUrgent ? 'br' : 'bp'}`} onClick={doAnnounce}>{annUrgent ? '🚨 SEND URGENT' : '📢 BROADCAST'}</button>
             <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setAnnModal(false)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* ══ NOTIFICATIONS DRAWER ══ */}
+      {notifTab && (
+        <div className="overlay" onClick={() => setNotifTab(false)}>
+          <div className="modal" style={{ maxWidth: 540 }} onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 19 }}>🔔 Notifications</div>
+                <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginTop: 3 }}>ALL ANNOUNCEMENTS</div>
+              </div>
+              {anns.some(a => !seenAnns.includes(a.timestamp)) && (
+                <button className="btn bg" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }}
+                  onClick={() => markAllAnnsSeen(anns)}>MARK ALL READ</button>
+              )}
+            </div>
+            {anns.length === 0
+              ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '32px 0', fontSize: 13 }}>No announcements yet.</div>
+              : anns.map((a) => {
+                const isRead = seenAnns.includes(a.timestamp);
+                return (
+                  <div key={a.timestamp} style={{ padding: '13px 14px', borderRadius: 12, marginBottom: 10, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.06)', border: `1px solid ${a.urgent ? (isRead ? 'rgba(244,63,94,.1)' : 'rgba(244,63,94,.3)') : (isRead ? 'rgba(192,132,252,.1)' : 'rgba(192,132,252,.25)')}`, opacity: isRead ? 0.65 : 1, transition: 'opacity .2s' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
+                      {a.urgent && <span>🚨</span>}
+                      <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'BROADCAST'} — {a.from}</span>
+                      {!isRead && <span style={{ marginLeft: 4, width: 7, height: 7, borderRadius: '50%', background: a.urgent ? 'var(--red)' : 'var(--purple)', display: 'inline-block' }} />}
+                      <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
+                    </div>
+                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>{a.text}</div>
+                  </div>
+                );
+              })
+            }
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setNotifTab(false)}>CLOSE</button>
           </div>
         </div>
       )}
