@@ -62,6 +62,15 @@ const schedStart = (shiftLabel, clockInTs) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POSITIONS & ROLES
 // ─────────────────────────────────────────────────────────────────────────────
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const DAY_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// Returns today's day-of-week in PH time (0=Sun … 6=Sat)
+const todayDowPH = () => {
+  const ymd = new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ });
+  return new Date(ymd + 'T12:00:00+08:00').getDay();
+};
+
 const POSITIONS = [
   'Customer Service Agent', 'Senior Agent', 'Team Lead',
   'Quality Analyst', 'DMCA Specialist', 'Chargeback Analyst',
@@ -451,6 +460,9 @@ function AppInner() {
   // ── server data ──
   const [swapReqs,   setSwapReqs]   = useState([]);
   const [anns,       setAnns]       = useState([]);
+  const [acks,       setAcks]       = useState([]); // ANN_ACK records from server
+  const [dayOffs,    setDayOffs]    = useState({}); // { agentName: dayOfWeekNumber (0-6) }
+  const [editDayOff, setEditDayOff] = useState(null); // { name } agent being edited
   const [escals,     setEscals]     = useState([]);
   const [memos,      setMemos]      = useState([]);
 
@@ -562,6 +574,12 @@ function AppInner() {
       const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const escs_  = d.filter(i => i.action === 'ESCALATE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const mems_  = d.filter(i => i.action === 'MEMO').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const acks_  = d.filter(i => i.action === 'ANN_ACK').map(parse);
+      // Build latest day-off per agent (most recent DAYOFF_SET wins)
+      const dayOffMap = {};
+      d.filter(i => i.action === 'DAYOFF_SET').map(parse)
+        .sort((a,b) => (Number(a.timestamp)||0) - (Number(b.timestamp)||0))
+        .forEach(r => { if (r.agent && r.dayOff !== undefined) dayOffMap[r.agent] = Number(r.dayOff); });
 
       const map = {};
       uRows.forEach(u => {
@@ -572,9 +590,17 @@ function AppInner() {
       });
 
       setAgents(Object.values(map));
-      setLogs(lRows);
+      // Merge server logs, deduplicating by timestamp+agent+action
+      // to avoid showing optimistic entries twice after the sync
+      setLogs(prev => {
+        const serverKeys = new Set(lRows.map(l => `${l.timestamp}_${l.agent}_${l.action}`));
+        const localOnly  = prev.filter(l => !serverKeys.has(`${l.timestamp}_${l.agent}_${l.action}`));
+        return [...lRows, ...localOnly].sort((a, b) => b.timestamp - a.timestamp);
+      });
       setSwapReqs(swaps);
       setAnns(anns_);
+      setAcks(acks_);
+      setDayOffs(dayOffMap);
       setEscals(escs_);
       setMemos(mems_);
     } catch (e) { console.error(e); }
@@ -639,21 +665,43 @@ function AppInner() {
   const doAction = async (type) => {
     setBusy(true);
     try {
-      const ts = Date.now();
+      const ts    = Date.now();
       const proof = await audit().catch(() => navigator.platform);
-      const rec = recs[user?.name] || {};
+      const rec   = recs[user?.name] || {};
       let nx = { ...rec };
       if (type === 'clockIn')    { nx = { clockIn: ts, breakUsedMs: 0, pauseUsedMs: 0 }; }
-      if (type === 'breakStart') { nx.onBreak = true; nx.breakStart = ts; }
+      if (type === 'breakStart') { nx.onBreak = true;  nx.breakStart = ts; }
       if (type === 'breakEnd')   { nx.onBreak = false; nx.breakUsedMs = (nx.breakUsedMs || 0) + (ts - (nx.breakStart || ts)); delete nx.breakStart; }
-      if (type === 'dutyPause')  { nx.onPause = true; nx.pauseStart = ts; }
+      if (type === 'dutyPause')  { nx.onPause = true;  nx.pauseStart = ts; }
       if (type === 'dutyResume') { nx.onPause = false; nx.pauseUsedMs = (nx.pauseUsedMs || 0) + (ts - (nx.pauseStart || ts)); delete nx.pauseStart; }
       if (type === 'clockOut')   { nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 }; }
       setRecs(p => ({ ...p, [user.name]: nx }));
-      // post never throws — best effort, offline-safe
-      post({ date: phNowDate(), time: phNowTime(), action: type, agent: user.name, device: proof, timestamp: ts }).catch(console.error);
+
+      // ── OPTIMISTIC LOCAL UPDATE ────────────────────────────────────────────
+      // Add the action to the local logs state immediately so the timeline
+      // shows it right away, even before the server responds.
+      const localEntry = {
+        date:      phNowDate(),
+        time:      phNowTime(),
+        action:    type,
+        agent:     user.name,
+        device:    proof,
+        timestamp: ts,
+      };
+      setLogs(prev => [localEntry, ...prev]);
+      // ──────────────────────────────────────────────────────────────────────
+
       showToast(AL[type] || type);
-      await fetch_().catch(console.error);
+
+      // Send to server, then do a background sync to get the canonical server state.
+      // We await post so the data reaches Sheets before we refetch.
+      try {
+        await post({ date: localEntry.date, time: localEntry.time, action: type, agent: user.name, device: proof, timestamp: ts });
+      } catch (_) { /* network issue — optimistic entry already shown */ }
+
+      // Background sync (non-blocking — don't await so UI stays fast)
+      fetch_().catch(console.error);
+
     } catch (e) {
       console.error('doAction error:', e);
       showToast('Action failed — please try again', 'err');
@@ -705,6 +753,41 @@ function AppInner() {
     setEscalModal(false); setEscalTitle(''); setEscalDetail(''); setEscalUrgent(false);
     await fetch_(); setBusy(false);
   };
+
+  // ── ACKNOWLEDGE ANNOUNCEMENT ──
+  const doAcknowledge = async (annTimestamp) => {
+    if (!user?.name) return;
+    // Check if already acked
+    if (acks.some(a => a.annTs === annTimestamp && a.agent === user.name)) return;
+    // Optimistic local update
+    const localAck = { action: 'ANN_ACK', agent: user.name, annTs: annTimestamp, date: phNowDate(), time: phNowTime(), timestamp: Date.now() };
+    setAcks(prev => [...prev, localAck]);
+    post({ date: localAck.date, time: localAck.time, action: 'ANN_ACK', agent: user.name, timestamp: localAck.timestamp, device: JSON.stringify({ annTs: annTimestamp, agent: user.name }) }).catch(console.error);
+    showToast('Acknowledged ✓');
+  };
+
+  // ── DAY OFF MANAGEMENT ──
+  const doSetDayOff = async (agentName, dayOfWeek) => {
+    // dayOfWeek: 0-6 (0=Sun) or null to clear
+    setBusy(true);
+    const payload = { date: phNowDate(), time: phNowTime(), action: 'DAYOFF_SET',
+      agent: agentName, timestamp: Date.now(),
+      device: JSON.stringify({ dayOff: dayOfWeek, setBy: user?.name }) };
+    // Optimistic local update
+    setDayOffs(prev => ({ ...prev, [agentName]: dayOfWeek }));
+    try { await post(payload); } catch(_) {}
+    fetch_().catch(console.error);
+    setEditDayOff(null);
+    setBusy(false);
+    showToast(dayOfWeek !== null ? `Day off set: ${DAY_NAMES[dayOfWeek]}` : 'Day off cleared');
+  };
+
+  // Helper: is a given agent on day off RIGHT NOW (PH time)?
+  const isOnDayOff = useCallback((agentName) => {
+    const dow = dayOffs[agentName];
+    if (dow === undefined || dow === null) return false;
+    return todayDowPH() === Number(dow);
+  }, [dayOffs]);
 
   // ── ANNOUNCE ──
   const doAnnounce = async () => {
@@ -1004,11 +1087,31 @@ function AppInner() {
                   <div>
                     <div style={{ fontWeight: 800, fontSize: 16 }}>{user.name}</div>
                     <div style={{ fontSize: 11, color: dc(user.platform), fontFamily: 'var(--mono)', marginTop: 2 }}>◆ {user.platform}</div>
-                    <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 1 }}>{user.position || 'Customer Service Agent'} · {sh.label} Shift ({sh.start}–{sh.end})</div>
+                    <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 1 }}>
+                      {user.position || 'Customer Service Agent'} · {sh.label} Shift ({sh.start}–{sh.end})
+                      {dayOffs[user.name] !== undefined && <span style={{ color: 'var(--amber)', marginLeft: 6 }}>· Day Off: Every {DAY_NAMES[dayOffs[user.name]]}</span>}
+                    </div>
                   </div>
                 </div>
-                <Chip color={agentSt.color}><Dot color={agentSt.color} pulse={agentSt.pulse} /> {agentSt.label}</Chip>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  {isOnDayOff(user.name) && !rec.clockIn && <Chip color="var(--amber)">🏖 DAY OFF</Chip>}
+                  <Chip color={agentSt.color}><Dot color={agentSt.color} pulse={agentSt.pulse} /> {agentSt.label}</Chip>
+                </div>
               </div>
+
+              {/* DAY OFF BLOCK — replaces session card when on day off and not already clocked in */}
+              {isOnDayOff(user.name) && !rec.clockIn && (
+                <div style={{ padding: '28px 24px', borderRadius: 16, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', textAlign: 'center' }}>
+                  <div style={{ fontSize: 48, marginBottom: 12 }}>🏖</div>
+                  <div style={{ fontWeight: 800, fontSize: 20, marginBottom: 6 }}>Today is your Day Off</div>
+                  <div style={{ fontSize: 13, color: 'var(--sub)', fontFamily: 'var(--mono)', marginBottom: 16 }}>
+                    {new Date().toLocaleDateString('en-PH', { timeZone: PH_TZ, weekday: 'long', month: 'long', day: 'numeric' })} · Rest well!
+                  </div>
+                  <div className="alert awn" style={{ maxWidth: 360, margin: '0 auto', justifyContent: 'center' }}>
+                    Clock-in is disabled on your assigned day off. Contact your manager if this is incorrect.
+                  </div>
+                </div>
+              )}
 
               {/* SHIFT COMPLETE BANNER */}
               {rec.clockedOut && rec.clockIn && (
@@ -1108,8 +1211,8 @@ function AppInner() {
 
                   {/* Action buttons */}
                   <div className="actg">
-                    <button className="btn bt" disabled={busy || !(!rec.clockIn || rec.clockedOut)} onClick={() => doAction('clockIn')}>
-                      {busy && !rec.clockIn ? '⏳ LOADING...' : '▶ CLOCK IN'}
+                    <button className="btn bt" disabled={busy || isOnDayOff(user.name) || !(!rec.clockIn || rec.clockedOut)} onClick={() => doAction('clockIn')}>
+                      {busy && !rec.clockIn ? '⏳ LOADING...' : isOnDayOff(user.name) && !rec.clockIn ? '🏖 DAY OFF' : '▶ CLOCK IN'}
                     </button>
                     <button className="btn br" disabled={!(rec.clockIn && !rec.onBreak && !rec.onPause && !rec.clockedOut)} onClick={() => doAction('clockOut')}>■ CLOCK OUT</button>
                     <button className="btn ba s2" disabled={!(rec.clockIn && !rec.onPause && !rec.clockedOut)} onClick={() => doAction(rec.onBreak ? 'breakEnd' : 'breakStart')}>
@@ -1162,6 +1265,33 @@ function AppInner() {
                       </div>
                     ))}
                   </Glass>}
+
+                  {/* Handover Memos — latest memos from same platform teammates */}
+                  {(() => {
+                    const handoverMemos = memos.filter(m =>
+                      m.agent !== user.name &&
+                      agents.find(a => a.name === m.agent && a.platform === user.platform && (a.shift || 'Morning') === (user.shift || 'Morning'))
+                    ).slice(0, 3);
+                    if (!handoverMemos.length) return null;
+                    return (
+                      <Glass style={{ padding: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                          <span style={{ fontSize: 14 }}>📋</span>
+                          <div style={{ fontWeight: 700, fontSize: 13 }}>Handover Notes</div>
+                          <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginLeft: 4 }}>from your team</span>
+                        </div>
+                        {handoverMemos.map((m, i) => (
+                          <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--sub)', marginBottom: 4 }}>
+                              <span style={{ color: dc(agents.find(a => a.name === m.agent)?.platform), fontWeight: 700 }}>{m.agent}</span>
+                              <span>{m.date} {m.time}</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text)', lineHeight: 1.5 }}>{m.text}</div>
+                          </div>
+                        ))}
+                      </Glass>
+                    );
+                  })()}
 
                   {/* Today's timeline */}
                   <Glass style={{ flex: 1 }}>
@@ -1245,7 +1375,7 @@ function AppInner() {
             </div>
 
             <div className="tabs">
-              {['attendance','payroll','swaps','escalations','team','logs','onboarding'].map(t => (
+              {['attendance','payroll','swaps','escalations','schedule','team','logs','onboarding'].map(t => (
                 <button key={t} className={`btn-tab${tab === t ? ' on' : ''}`} onClick={() => setTab(t)}>
                   {t === 'swaps' && pendingSwaps.length > 0 ? `SWAPS (${pendingSwaps.length})` :
                     t === 'escalations' && openEscals.length > 0 ? `🚨 ESC (${openEscals.length})` :
@@ -1283,8 +1413,9 @@ function AppInner() {
                           <div style={{ fontSize: 9, fontWeight: 700, fontFamily: 'var(--mono)', color: a.status.color }}>{a.sPct.toFixed(0)}%</div>
                         </Ring>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                             {a.name}
+                            {isOnDayOff(a.name) && <Chip color="var(--amber)" small>🏖 DAY OFF</Chip>}
                             {a.lateMs > 0 && <Chip color="var(--amber)" small>LATE</Chip>}
                             {a.otMs > 0 && <Chip color="var(--purple)" small>OT</Chip>}
                             {a.status === ST.PAUSED && <Chip color="var(--orange)" small>PAUSED</Chip>}
@@ -1428,6 +1559,80 @@ function AppInner() {
             )}
 
             {/* TEAM */}
+            {/* ── SCHEDULE / DAY OFF TAB ── */}
+            {tab === 'schedule' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* Weekly roster overview */}
+                <Glass>
+                  <SectionHead>Weekly Day-Off Roster</SectionHead>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginBottom: 8 }}>
+                    {DAY_NAMES.map((day, dow) => {
+                      const offAgents = agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT && dayOffs[a.name] === dow);
+                      const isToday = todayDowPH() === dow;
+                      return (
+                        <div key={dow} style={{ borderRadius: 12, padding: '10px 8px', background: isToday ? 'rgba(56,189,248,0.1)' : 'rgba(0,0,0,0.25)', border: `1px solid ${isToday ? 'rgba(56,189,248,0.35)' : 'rgba(255,255,255,0.07)'}`, textAlign: 'center', minHeight: 80 }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, fontFamily: 'var(--mono)', color: isToday ? 'var(--blue)' : 'var(--sub)', marginBottom: 6 }}>{DAY_SHORT[dow]}{isToday ? ' ←' : ''}</div>
+                          {offAgents.length === 0
+                            ? <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', fontFamily: 'var(--mono)' }}>—</div>
+                            : offAgents.map(a => (
+                              <div key={a.name} style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)', fontFamily: 'var(--mono)', marginBottom: 2, lineHeight: 1.4 }}>🏖 {a.name}</div>
+                            ))
+                          }
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', textAlign: 'center', marginTop: 4 }}>
+                    {Object.keys(dayOffs).length} / {agents.filter(a=>a.status==='active'&&a.role===ROLE_AGENT).length} agents have day off assigned
+                  </div>
+                </Glass>
+
+                {/* Per-agent day off assignment */}
+                <Glass>
+                  <SectionHead>Assign Day Off</SectionHead>
+                  {agents.filter(a => a.status === 'active').map(agent => {
+                    const currentDow = dayOffs[agent.name];
+                    const isEditing = editDayOff?.name === agent.name;
+                    return (
+                      <div key={agent.name} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 8px', borderBottom: '1px solid rgba(255,255,255,0.05)', flexWrap: 'wrap' }}>
+                        <div className="av" style={{ background: dg(agent.platform), color: dc(agent.platform) }}>{agent.name[0]}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13 }}>{agent.name}</div>
+                          <div style={{ fontSize: 10, color: dc(agent.platform), fontFamily: 'var(--mono)', marginTop: 2 }}>{agent.platform} · {agent.position || 'Agent'}{agent.role === ROLE_MANAGER ? ' · Manager' : ''}</div>
+                        </div>
+                        {isEditing ? (
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            {DAY_NAMES.map((day, dow) => (
+                              <button key={dow} className={`btn ${currentDow === dow ? 'ba' : 'bg'}`}
+                                style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
+                                onClick={() => doSetDayOff(agent.name, dow)}>
+                                {DAY_SHORT[dow]}
+                              </button>
+                            ))}
+                            {currentDow !== undefined && <button className="btn br" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }} onClick={() => doSetDayOff(agent.name, null)}>CLEAR</button>}
+                            <button className="btn bg" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }} onClick={() => setEditDayOff(null)}>✕</button>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {currentDow !== undefined
+                              ? <Chip color="var(--amber)">🏖 {DAY_NAMES[currentDow]}</Chip>
+                              : <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>Not set</span>
+                            }
+                            {isOnDayOff(agent.name) && <Chip color="var(--red)" small>OFF TODAY</Chip>}
+                            <button className="btn bg" style={{ fontSize: 11, minHeight: 34, padding: '6px 14px' }}
+                              onClick={() => setEditDayOff({ name: agent.name })}>
+                              {currentDow !== undefined ? '✎ CHANGE' : '+ ASSIGN'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </Glass>
+              </div>
+            )}
+
             {tab === 'team' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 <Glass>
@@ -1466,16 +1671,45 @@ function AppInner() {
                   </SectionHead>
                   {anns.length === 0
                     ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontSize: 13 }}>No announcements yet.</div>
-                    : anns.slice(0, 10).map((a, i) => (
-                      <div key={i} style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 8, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.2)' : 'rgba(192,132,252,.2)'}` }}>
-                        <div style={{ display: 'flex', gap: 8, marginBottom: 4 }}>
-                          {a.urgent && <span>🚨</span>}
-                          <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'BROADCAST'}</span>
-                          <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
+                    : anns.slice(0, 10).map((a, i) => {
+                      const ackList = acks.filter(k => k.annTs === a.timestamp);
+                      const totalAgents = agents.filter(ag => ag.status === 'active' && ag.role === ROLE_AGENT).length;
+                      const pct = totalAgents > 0 ? Math.round((ackList.length / totalAgents) * 100) : 0;
+                      return (
+                        <div key={i} style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 8, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.2)' : 'rgba(192,132,252,.2)'}` }}>
+                          <div style={{ display: 'flex', gap: 8, marginBottom: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                            {a.urgent && <span>🚨</span>}
+                            <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'BROADCAST'}</span>
+                            <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
+                          </div>
+                          <div style={{ fontSize: 13, lineHeight: 1.5, marginBottom: 8 }}>{a.text}</div>
+                          {/* Acknowledgement tracker */}
+                          <div style={{ borderTop: '1px solid rgba(255,255,255,.06)', paddingTop: 8 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                              <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>READ BY</span>
+                              <span style={{ fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 700, color: ackList.length === totalAgents && totalAgents > 0 ? 'var(--teal)' : 'var(--amber)' }}>
+                                {ackList.length} / {totalAgents} agents ({pct}%)
+                              </span>
+                            </div>
+                            {/* Progress bar */}
+                            <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden', marginBottom: 6 }}>
+                              <div style={{ height: '100%', width: `${pct}%`, background: pct === 100 ? 'var(--teal)' : 'var(--amber)', borderRadius: 2, transition: 'width .4s ease' }} />
+                            </div>
+                            {/* Agent name chips */}
+                            {ackList.length > 0 && (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                {ackList.map((k, j) => (
+                                  <span key={j} style={{ padding: '2px 9px', borderRadius: 20, background: 'rgba(34,211,165,.12)', color: 'var(--teal)', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                                    ✓ {k.agent}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {ackList.length === 0 && <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>No acknowledgements yet</span>}
+                          </div>
                         </div>
-                        <div style={{ fontSize: 13, lineHeight: 1.5 }}>{a.text}</div>
-                      </div>
-                    ))}
+                      );
+                    })}
                 </Glass>
               </div>
             )}
@@ -1701,16 +1935,36 @@ function AppInner() {
               ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '32px 0', fontSize: 13 }}>No announcements yet.</div>
               : anns.map((a) => {
                 const isRead = Array.isArray(seenAnns) && seenAnns.includes(a.timestamp);
+                const myAck = acks.some(k => k.annTs === a.timestamp && k.agent === user?.name);
+                const ackList = acks.filter(k => k.annTs === a.timestamp);
+                const isManager = user?.role === ROLE_MANAGER || user?.role === ROLE_FINANCE;
                 return (
                   <div key={a.timestamp} style={{ padding: '13px 14px', borderRadius: 12, marginBottom: 10, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.06)', border: `1px solid ${a.urgent ? (isRead ? 'rgba(244,63,94,.1)' : 'rgba(244,63,94,.3)') : (isRead ? 'rgba(192,132,252,.1)' : 'rgba(192,132,252,.25)')}`, opacity: isRead ? 0.65 : 1, transition: 'opacity .2s' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
-                      {a.urgent && <span>🚨</span>}
-                      <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'BROADCAST'} — {a.from}</span>
-                      {!isRead && <span style={{ marginLeft: 4, width: 7, height: 7, borderRadius: '50%', background: a.urgent ? 'var(--red)' : 'var(--purple)', display: 'inline-block' }} />}
-                      <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
-                    </div>
-                    <div style={{ fontSize: 13, lineHeight: 1.6 }}>{a.text}</div>
-                  </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
+                          {a.urgent && <span>🚨</span>}
+                          <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'BROADCAST'} — {a.from}</span>
+                          {!isRead && <span style={{ marginLeft: 4, width: 7, height: 7, borderRadius: '50%', background: a.urgent ? 'var(--red)' : 'var(--purple)', display: 'inline-block' }} />}
+                          <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 'auto' }}>{a.date} {a.time}</span>
+                        </div>
+                        <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 10 }}>{a.text}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                          {/* Acknowledge button — only for agents, hidden for managers */}
+                          {!isManager && (
+                            myAck
+                              ? <span style={{ fontSize: 11, color: 'var(--teal)', fontFamily: 'var(--mono)', fontWeight: 700 }}>✓ ACKNOWLEDGED</span>
+                              : <button className="btn bt" style={{ fontSize: 11, minHeight: 32, padding: '6px 14px' }} onClick={() => { doAcknowledge(a.timestamp); markAnnSeen(a.timestamp); }}>✓ ACKNOWLEDGE</button>
+                          )}
+                          {/* Ack count — visible to everyone, full list to managers */}
+                          {ackList.length > 0 && (
+                            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>
+                              {isManager
+                                ? <span style={{ color: 'var(--teal)', cursor: 'default' }} title={ackList.map(k => k.agent).join(', ')}>✓ {ackList.length} agent{ackList.length !== 1 ? 's' : ''} acknowledged · {ackList.map(k => k.agent).join(', ')}</span>
+                                : <span style={{ color: 'var(--teal)' }}>✓ {ackList.length} acknowledged</span>
+                              }
+                            </div>
+                          )}
+                        </div>
+                      </div>
                 );
               })
             }
