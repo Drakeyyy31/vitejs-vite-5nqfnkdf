@@ -1,3 +1,4 @@
+import React from 'react';
 import { useState, useEffect, useMemo, useCallback } from 'react';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -363,9 +364,33 @@ const lsSet = (key, val) => { try { localStorage.setItem(key, JSON.stringify(val
 const lsDel = key => { try { localStorage.removeItem(key); } catch { } };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ERROR BOUNDARY — catches render crashes, shows a reload button instead of blank
+// ─────────────────────────────────────────────────────────────────────────────
+class AppErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ minHeight: '100vh', background: '#03050f', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#e2e8f0', fontFamily: 'monospace', gap: 20, padding: 32, textAlign: 'center' }}>
+          <div style={{ fontSize: 36 }}>⚠</div>
+          <div style={{ fontWeight: 700, fontSize: 18 }}>Something went wrong</div>
+          <div style={{ fontSize: 12, color: '#64748b', maxWidth: 400, lineHeight: 1.6 }}>{String(this.state.error)}</div>
+          <button onClick={() => { this.setState({ error: null }); window.location.reload(); }}
+            style={{ padding: '12px 28px', background: '#22d3a5', color: '#000', border: 'none', borderRadius: 12, fontWeight: 700, fontSize: 14, cursor: 'pointer', fontFamily: 'monospace' }}>
+            RELOAD APP
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
-export default function App() {
+function AppInner() {
 
   // ── state ──
   const [view,   setView]  = useState(() => { const u = lsGet('afs_user'); return u ? (u.role === ROLE_MANAGER ? 'mgr' : u.role === ROLE_FINANCE ? 'finance' : 'agent') : 'landing'; });
@@ -414,7 +439,13 @@ export default function App() {
 
   // ── notifications: track which announcement IDs have been seen by this user ──
   // Key: 'afs_seen_' + username, Value: array of announcement timestamps (used as IDs)
-  const [seenAnns, setSeenAnns] = useState(() => lsGet(`afs_seen_${lsGet('afs_user')?.name || 'x'}`) || []);
+  const [seenAnns, setSeenAnns] = useState(() => {
+    try {
+      const u = lsGet('afs_user');
+      const raw = u?.name ? lsGet(`afs_seen_${u.name}`) : null;
+      return Array.isArray(raw) ? raw : [];
+    } catch { return []; }
+  });
   const [notifTab, setNotifTab] = useState(false); // notification drawer open
 
   // ── server data ──
@@ -442,17 +473,20 @@ export default function App() {
 
   const markAnnSeen = useCallback((ts) => {
     setSeenAnns(prev => {
-      if (prev.includes(ts)) return prev;
-      const next = [...prev, ts];
-      if (user?.name) lsSet(`afs_seen_${user.name}`, next);
+      const safe = Array.isArray(prev) ? prev : [];
+      if (safe.includes(ts)) return safe;
+      const next = [...safe, ts];
+      try { if (user?.name) lsSet(`afs_seen_${user.name}`, next); } catch {}
       return next;
     });
   }, [user?.name]); // eslint-disable-line
 
   const markAllAnnsSeen = useCallback((annList) => {
-    const tsList = annList.map(a => a.timestamp);
+    if (!Array.isArray(annList)) return;
+    const tsList = annList.map(a => a.timestamp).filter(Boolean);
     setSeenAnns(prev => {
-      const next = [...new Set([...prev, ...tsList])];
+      const safe = Array.isArray(prev) ? prev : [];
+      const next = [...new Set([...safe, ...tsList])];
       if (user?.name) lsSet(`afs_seen_${user.name}`, next);
       return next;
     });
@@ -604,20 +638,28 @@ export default function App() {
   // ── CLOCK ACTIONS ──
   const doAction = async (type) => {
     setBusy(true);
-    const ts = Date.now(), proof = await audit();
-    const rec = recs[user.name] || {};
-    let nx = { ...rec };
-    if (type === 'clockIn')    { nx = { clockIn: ts, breakUsedMs: 0, pauseUsedMs: 0 }; }
-    if (type === 'breakStart') { nx.onBreak = true; nx.breakStart = ts; }
-    if (type === 'breakEnd')   { nx.onBreak = false; nx.breakUsedMs = (nx.breakUsedMs || 0) + (ts - nx.breakStart); delete nx.breakStart; }
-    if (type === 'dutyPause')  { nx.onPause = true; nx.pauseStart = ts; }
-    if (type === 'dutyResume') { nx.onPause = false; nx.pauseUsedMs = (nx.pauseUsedMs || 0) + (ts - nx.pauseStart); delete nx.pauseStart; }
-    if (type === 'clockOut')   { nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 }; }
-    setRecs(p => ({ ...p, [user.name]: nx }));
-    await post({ date: phNowDate(), time: phNowTime(), action: type, agent: user.name, device: proof, timestamp: ts });
-    showToast(AL[type] || type);
-    await fetch_();
-    setBusy(false);
+    try {
+      const ts = Date.now();
+      const proof = await audit().catch(() => navigator.platform);
+      const rec = recs[user?.name] || {};
+      let nx = { ...rec };
+      if (type === 'clockIn')    { nx = { clockIn: ts, breakUsedMs: 0, pauseUsedMs: 0 }; }
+      if (type === 'breakStart') { nx.onBreak = true; nx.breakStart = ts; }
+      if (type === 'breakEnd')   { nx.onBreak = false; nx.breakUsedMs = (nx.breakUsedMs || 0) + (ts - (nx.breakStart || ts)); delete nx.breakStart; }
+      if (type === 'dutyPause')  { nx.onPause = true; nx.pauseStart = ts; }
+      if (type === 'dutyResume') { nx.onPause = false; nx.pauseUsedMs = (nx.pauseUsedMs || 0) + (ts - (nx.pauseStart || ts)); delete nx.pauseStart; }
+      if (type === 'clockOut')   { nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 }; }
+      setRecs(p => ({ ...p, [user.name]: nx }));
+      // post never throws — best effort, offline-safe
+      post({ date: phNowDate(), time: phNowTime(), action: type, agent: user.name, device: proof, timestamp: ts }).catch(console.error);
+      showToast(AL[type] || type);
+      await fetch_().catch(console.error);
+    } catch (e) {
+      console.error('doAction error:', e);
+      showToast('Action failed — please try again', 'err');
+    } finally {
+      setBusy(false);
+    }
   };
 
   // ── SWAP ──
@@ -1003,7 +1045,7 @@ export default function App() {
               )}
 
               {/* ANNOUNCEMENT BANNERS — only unread, dismissible */}
-              {anns.filter(a => !seenAnns.includes(a.timestamp)).slice(0, 3).map((a) => (
+              {anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).slice(0, 3).map((a) => (
                 <div key={a.timestamp} style={{ padding: '11px 16px', borderRadius: 12, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.25)' : 'rgba(192,132,252,.2)'}` }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                     {a.urgent && <span>🚨</span>}
@@ -1091,7 +1133,7 @@ export default function App() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   {/* Notification bell with unread badge */}
                 {(() => {
-                  const unread = anns.filter(a => !seenAnns.includes(a.timestamp)).length;
+                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).length;
                   return (
                     <button style={{ display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'10px 16px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',width:'100%',color:'var(--purple)',fontWeight:700,fontSize:13,fontFamily:'var(--font)',position:'relative' }}
                       onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
@@ -1188,7 +1230,7 @@ export default function App() {
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 {(() => {
-                  const unread = anns.filter(a => !seenAnns.includes(a.timestamp)).length;
+                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).length;
                   return (
                     <button style={{ position:'relative',display:'flex',alignItems:'center',gap:6,padding:'10px 14px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',color:'var(--purple)',fontWeight:700,fontSize:12,fontFamily:'var(--font)' }}
                       onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
@@ -1658,7 +1700,7 @@ export default function App() {
             {anns.length === 0
               ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '32px 0', fontSize: 13 }}>No announcements yet.</div>
               : anns.map((a) => {
-                const isRead = seenAnns.includes(a.timestamp);
+                const isRead = Array.isArray(seenAnns) && seenAnns.includes(a.timestamp);
                 return (
                   <div key={a.timestamp} style={{ padding: '13px 14px', borderRadius: 12, marginBottom: 10, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.06)', border: `1px solid ${a.urgent ? (isRead ? 'rgba(244,63,94,.1)' : 'rgba(244,63,94,.3)') : (isRead ? 'rgba(192,132,252,.1)' : 'rgba(192,132,252,.25)')}`, opacity: isRead ? 0.65 : 1, transition: 'opacity .2s' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
@@ -1731,6 +1773,15 @@ export default function App() {
 // ─────────────────────────────────────────────────────────────────────────────
 // PAYROLL PANEL (shared between Manager and Finance portals)
 // ─────────────────────────────────────────────────────────────────────────────
+// Wrap AppInner in ErrorBoundary for default export
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppInner />
+    </AppErrorBoundary>
+  );
+}
+
 function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPayStart, payEnd, setPayEnd, payRange, exportPayCSV, setPayModal }) {
   const totalGross = payrollData.reduce((s, a) => s + a.grossPay, 0);
   const totalOt    = payrollData.reduce((s, a) => s + a.otPay, 0);
