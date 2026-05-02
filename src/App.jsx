@@ -30,6 +30,14 @@ const tsKey   = () => new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ }
 const phNowDate = () => new Date().toLocaleDateString('en-PH', { timeZone: PH_TZ });
 const phNowTime = () => new Date().toLocaleTimeString('en-PH', { timeZone: PH_TZ });
 
+// Stable unique ID for an announcement — used for seen/ack tracking.
+// Composed from fields that Sheets always returns as plain text,
+// so it's immune to timestamp format changes across environments.
+// Stable announcement ID — uses only plain-text fields that Sheets never reformats.
+// date/time columns can come back as ISO strings or locale strings depending on
+// column format, so we exclude them and key on from+text which are always plain text.
+const annId = a => `${a.from || a.agent || ''}_${String(a.text || '').trim().slice(0, 40)}`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SHIFTS & DEPARTMENTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +472,7 @@ function AppInner() {
   const [dayOffs,    setDayOffs]    = useState({}); // { agentName: dayOfWeekNumber (0-6) }
   const [editDayOff, setEditDayOff] = useState(null); // { name } agent being edited
   const [escals,     setEscals]     = useState([]);
+  const [escAcks,    setEscAcks]    = useState([]); // ESC_ACK records from server
   const [memos,      setMemos]      = useState([]);
 
   // ── tick ──
@@ -483,11 +492,14 @@ function AppInner() {
     }
   }, [user?.name]); // eslint-disable-line
 
-  const markAnnSeen = useCallback((ts) => {
+  const markAnnSeen = useCallback((ann) => {
+    // ann can be the full object or a raw id string (legacy)
+    const id = (ann && typeof ann === 'object') ? annId(ann) : String(ann || '');
+    if (!id) return;
     setSeenAnns(prev => {
       const safe = Array.isArray(prev) ? prev : [];
-      if (safe.includes(ts)) return safe;
-      const next = [...safe, ts];
+      if (safe.includes(id)) return safe;
+      const next = [...safe, id];
       try { if (user?.name) lsSet(`afs_seen_${user.name}`, next); } catch {}
       return next;
     });
@@ -495,11 +507,12 @@ function AppInner() {
 
   const markAllAnnsSeen = useCallback((annList) => {
     if (!Array.isArray(annList)) return;
-    const tsList = annList.map(a => a.timestamp).filter(Boolean);
+    const ids = annList.map(a => annId(a)).filter(Boolean);
+    if (!ids.length) return;
     setSeenAnns(prev => {
       const safe = Array.isArray(prev) ? prev : [];
-      const next = [...new Set([...safe, ...tsList])];
-      if (user?.name) lsSet(`afs_seen_${user.name}`, next);
+      const next = [...new Set([...safe, ...ids])];
+      try { if (user?.name) lsSet(`afs_seen_${user.name}`, next); } catch {}
       return next;
     });
   }, [user?.name]); // eslint-disable-line
@@ -565,7 +578,7 @@ function AppInner() {
       const d = await fetch(HOOK).then(r => r.json());
 
       const uRows = d.filter(i => i.action === 'USER_REGISTER' || i.action === 'USER_APPROVE');
-      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO'].includes(i.action))
+      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET'].includes(i.action))
         .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
         .sort((a, b) => b.timestamp - a.timestamp);
 
@@ -573,6 +586,7 @@ function AppInner() {
       const swaps = d.filter(i => ['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY'].includes(i.action)).map(parse);
       const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const escs_  = d.filter(i => i.action === 'ESCALATE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const escAcks_ = d.filter(i => i.action === 'ESC_ACK').map(parse);
       const mems_  = d.filter(i => i.action === 'MEMO').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const acks_  = d.filter(i => i.action === 'ANN_ACK').map(parse);
       // Build latest day-off per agent (most recent DAYOFF_SET wins)
@@ -602,6 +616,7 @@ function AppInner() {
       setAcks(acks_);
       setDayOffs(dayOffMap);
       setEscals(escs_);
+      setEscAcks(escAcks_);
       setMemos(mems_);
     } catch (e) { console.error(e); }
     setBusy(false);
@@ -742,6 +757,18 @@ function AppInner() {
     showToast('Memo submitted!');
     setMemoModal(false); setMemoText('');
     await fetch_(); setBusy(false);
+  };
+
+  // ── ACKNOWLEDGE ESCALATION (manager) ──
+  const doAckEscalation = async (esc) => {
+    if (!user?.name) return;
+    const escKey = `${esc.agent}|${esc.date}|${esc.time}|${String(esc.title||'').slice(0,20)}`;
+    // Optimistic update
+    const localAck = { action: 'ESC_ACK', agent: user.name, escKey, escalAgent: esc.agent, date: phNowDate(), time: phNowTime(), timestamp: Date.now() };
+    setEscAcks(prev => [...prev, localAck]);
+    post({ date: localAck.date, time: localAck.time, action: 'ESC_ACK', agent: user.name, timestamp: localAck.timestamp, device: JSON.stringify({ escKey, escalAgent: esc.agent, ackedBy: user.name }) }).catch(console.error);
+    showToast('Escalation acknowledged');
+    fetch_().catch(console.error);
   };
 
   // ── ESCALATE ──
@@ -938,9 +965,46 @@ function AppInner() {
       a.platform === user?.platform
     ), [agents, user]);
 
-  const pendingSwaps  = useMemo(() => swapReqs.filter(s => s.status === 'pending'), [swapReqs]);
-  const mySwaps       = useMemo(() => swapReqs.filter(s => s.from === user?.name || s.to === user?.name), [swapReqs, user]);
+  // Stable key for matching a request to its decision record
+  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}`;
+
+  const pendingSwaps = useMemo(() => {
+    // Build set of swap keys that already have a APPROVE or DENY decision
+    const decided = new Set(
+      swapReqs
+        .filter(s => s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY')
+        .map(s => swapKey(s))
+    );
+    // Only show SWAP_REQUEST records with no matching decision yet
+    return swapReqs.filter(s => s.action === 'SWAP_REQUEST' && !decided.has(swapKey(s)));
+  }, [swapReqs]);
+
+  // For agent's "my swaps" panel — deduplicate by key, keep most recent record
+  const mySwaps = useMemo(() => {
+    const mine = swapReqs.filter(s => s.from === user?.name || s.to === user?.name);
+    // Keep only decided swaps (approved/denied) — no point showing pending in agent view
+    // Deduplicate: one entry per swap key, decision record wins over request record
+    const map = {};
+    mine.forEach(s => {
+      const k = swapKey(s);
+      if (!map[k] || s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY') map[k] = s;
+    });
+    return Object.values(map).filter(s =>
+      s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY' ||
+      s.status === 'approved'     || s.status === 'denied'
+    );
+  }, [swapReqs, user]);
+  const escKey = e => `${e.agent}|${e.date}|${e.time}|${String(e.title||'').slice(0,20)}`;
   const openEscals    = useMemo(() => escals.filter(e => !e.resolved), [escals]);
+  // For each escalation, get the list of managers who acknowledged it
+  const escAckMap = useMemo(() => {
+    const map = {};
+    escAcks.forEach(a => {
+      if (!map[a.escKey]) map[a.escKey] = [];
+      map[a.escKey].push(a.agent);
+    });
+    return map;
+  }, [escAcks]);
 
   const exportAttCSV = () => {
     const rows = [['Agent','Position','Dept','Shift','Clock In','Clock Out','Break','Pause','Net Work','Overtime','Shift%','Status','Late']];
@@ -1148,13 +1212,13 @@ function AppInner() {
               )}
 
               {/* ANNOUNCEMENT BANNERS — only unread, dismissible */}
-              {anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).slice(0, 3).map((a) => (
+              {anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(annId(a))).slice(0, 3).map((a) => (
                 <div key={a.timestamp} style={{ padding: '11px 16px', borderRadius: 12, background: a.urgent ? 'rgba(244,63,94,.07)' : 'rgba(192,132,252,.07)', border: `1px solid ${a.urgent ? 'rgba(244,63,94,.25)' : 'rgba(192,132,252,.2)'}` }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                     {a.urgent && <span>🚨</span>}
                     <span style={{ fontSize: 10, fontWeight: 700, color: a.urgent ? 'var(--red)' : 'var(--purple)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>{a.urgent ? 'URGENT' : 'ANNOUNCEMENT'} — {a.from}</span>
                     <span style={{ fontSize: 10, color: 'var(--sub)', marginLeft: 8 }}>{a.date} {a.time}</span>
-                    <button onClick={() => markAnnSeen(a.timestamp)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--sub)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px' }} title="Dismiss">✕</button>
+                    <button onClick={() => markAnnSeen(a)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--sub)', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: '0 2px' }} title="Dismiss">✕</button>
                   </div>
                   <div style={{ fontSize: 13, lineHeight: 1.5 }}>{a.text}</div>
                 </div>
@@ -1236,7 +1300,7 @@ function AppInner() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
                   {/* Notification bell with unread badge */}
                 {(() => {
-                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).length;
+                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(annId(a))).length;
                   return (
                     <button style={{ display:'flex',alignItems:'center',justifyContent:'center',gap:8,padding:'10px 16px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',width:'100%',color:'var(--purple)',fontWeight:700,fontSize:13,fontFamily:'var(--font)',position:'relative' }}
                       onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
@@ -1254,17 +1318,60 @@ function AppInner() {
 
                   {/* My swaps */}
                   {mySwaps.length > 0 && <Glass style={{ padding: 16 }}>
-                    <SectionHead>My Swap Requests</SectionHead>
-                    {mySwaps.slice(0, 3).map((s, i) => (
-                      <div key={i} style={{ padding: '9px 0', borderBottom: '1px solid rgba(255,255,255,.05)', fontSize: 12 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{s.from === user.name ? `→ ${s.to}` : `← ${s.from}`} · {s.fromShift}</span>
-                          <Chip color={s.status === 'approved' ? '#22d3a5' : s.status === 'denied' ? '#f43f5e' : '#f59e0b'}>{s.status?.toUpperCase()}</Chip>
+                    <SectionHead>Swap Results</SectionHead>
+                    {mySwaps.slice(0, 5).map((s, i) => {
+                      const approved = s.action === 'SWAP_APPROVE' || s.status === 'approved';
+                      const denied   = s.action === 'SWAP_DENY'    || s.status === 'denied';
+                      return (
+                        <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                            <div>
+                              <div style={{ fontSize: 12, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>
+                                {s.from === user.name ? `You → ${s.to}` : `${s.from} → You`} · {s.fromShift}
+                              </div>
+                              {s.note && <div style={{ fontSize: 11, color: 'var(--sub)', marginTop: 2, fontStyle: 'italic' }}>"{s.note}"</div>}
+                              {s.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>by {s.decidedBy}</div>}
+                            </div>
+                            <Chip color={approved ? 'var(--teal)' : 'var(--red)'}>
+                              {approved ? '✓ APPROVED' : '✕ DENIED'}
+                            </Chip>
+                          </div>
                         </div>
-                        {s.note && <div style={{ fontSize: 11, color: 'var(--sub)', marginTop: 3 }}>{s.note}</div>}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </Glass>}
+
+                  {/* My Escalations — status feedback for agents */}
+                  {(() => {
+                    const myEscals = escals.filter(e => e.agent === user.name).slice(0, 3);
+                    if (!myEscals.length) return null;
+                    return (
+                      <Glass style={{ padding: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                          <span style={{ fontSize: 14 }}>🚨</span>
+                          <div style={{ fontWeight: 700, fontSize: 13 }}>My Escalations</div>
+                        </div>
+                        {myEscals.map((e, i) => {
+                          const key = escKey(e);
+                          const ackedBy = escAckMap[key] || [];
+                          return (
+                            <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                <div>
+                                  <div style={{ fontWeight: 700, fontSize: 12 }}>{e.urgent ? '🚨 ' : ''}{e.title}</div>
+                                  <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 2 }}>{e.date} {e.time}</div>
+                                </div>
+                                {ackedBy.length > 0
+                                  ? <Chip color="var(--teal)">✓ Seen by {ackedBy.join(', ')}</Chip>
+                                  : <Chip color="var(--sub)">Pending review</Chip>
+                                }
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </Glass>
+                    );
+                  })()}
 
                   {/* Handover Memos — latest memos from same platform teammates */}
                   {(() => {
@@ -1360,7 +1467,7 @@ function AppInner() {
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 {(() => {
-                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(a.timestamp)).length;
+                  const unread = anns.filter(a => !Array.isArray(seenAnns) || !seenAnns.includes(annId(a))).length;
                   return (
                     <button style={{ position:'relative',display:'flex',alignItems:'center',gap:6,padding:'10px 14px',borderRadius:12,border:'1px solid rgba(192,132,252,.3)',background:'rgba(192,132,252,.08)',cursor:'pointer',color:'var(--purple)',fontWeight:700,fontSize:12,fontFamily:'var(--font)' }}
                       onClick={() => { setNotifTab(true); markAllAnnsSeen(anns); }}>
@@ -1472,7 +1579,7 @@ function AppInner() {
                     <div className="sl">PENDING</div>
                   </div>
                   <div className="sc" style={{ background: 'rgba(34,211,165,.08)', border: '1px solid rgba(34,211,165,.2)' }}>
-                    <div className="sv" style={{ color: 'var(--teal)' }}>{swapReqs.filter(s => s.status === 'approved').length}</div>
+                    <div className="sv" style={{ color: 'var(--teal)' }}>{swapReqs.filter(s => s.action === 'SWAP_APPROVE' || s.status === 'approved').length}</div>
                     <div className="sl">APPROVED</div>
                   </div>
                 </div>
@@ -1506,18 +1613,27 @@ function AppInner() {
                   <SectionHead>Swap History</SectionHead>
                   <div className="tbl-wrap">
                     <table className="tbl" style={{ minWidth: 520 }}>
-                      <thead><tr><th>DATE</th><th>FROM</th><th>TO</th><th>DEPT</th><th>SHIFT</th><th>STATUS</th></tr></thead>
+                      <thead><tr><th>DATE</th><th>FROM</th><th>TO</th><th>DEPT</th><th>SHIFT</th><th>STATUS</th><th>DECIDED BY</th></tr></thead>
                       <tbody>
-                        {swapReqs.slice(0, 30).map((s, i) => (
+                        {(() => {
+                          // Deduplicate: one row per unique swap, showing final status
+                          const map = {};
+                          swapReqs.forEach(s => {
+                            const k = swapKey(s);
+                            if (!map[k] || s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY') map[k] = s;
+                          });
+                          return Object.values(map).slice(0, 30).map((s, i) => (
                           <tr key={i}>
                             <td style={{ color: 'var(--sub)', fontSize: 10 }}>{s.date}</td>
                             <td style={{ fontWeight: 700, color: 'var(--teal)' }}>{s.from}</td>
                             <td style={{ fontWeight: 700, color: 'var(--blue)' }}>{s.to}</td>
                             <td style={{ fontSize: 11 }}>{s.platform}</td>
                             <td style={{ fontSize: 11 }}>{s.fromShift}</td>
-                            <td><Chip color={s.status === 'approved' ? '#22d3a5' : s.status === 'denied' ? '#f43f5e' : '#f59e0b'}>{s.status?.toUpperCase()}</Chip></td>
+                            <td><Chip color={(s.action==='SWAP_APPROVE'||s.status==='approved') ? '#22d3a5' : (s.action==='SWAP_DENY'||s.status==='denied') ? '#f43f5e' : '#f59e0b'}>{s.action==='SWAP_APPROVE'||s.status==='approved' ? 'APPROVED' : s.action==='SWAP_DENY'||s.status==='denied' ? 'DENIED' : 'PENDING'}</Chip></td>
+                            <td style={{ fontSize: 11, color: 'var(--sub)' }}>{s.decidedBy || '—'}</td>
                           </tr>
-                        ))}
+                          ));
+                        })()}
                       </tbody>
                     </table>
                   </div>
@@ -1528,7 +1644,7 @@ function AppInner() {
             {/* ESCALATIONS */}
             {tab === 'escalations' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <div className="g2sm">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
                   <div className="sc" style={{ background: 'rgba(244,63,94,.08)', border: '1px solid rgba(244,63,94,.2)' }}>
                     <div className="sv" style={{ color: 'var(--red)' }}>{openEscals.filter(e => e.urgent).length}</div>
                     <div className="sl">URGENT OPEN</div>
@@ -1537,23 +1653,49 @@ function AppInner() {
                     <div className="sv" style={{ color: 'var(--amber)' }}>{openEscals.filter(e => !e.urgent).length}</div>
                     <div className="sl">STANDARD OPEN</div>
                   </div>
+                  <div className="sc" style={{ background: 'rgba(34,211,165,.08)', border: '1px solid rgba(34,211,165,.2)' }}>
+                    <div className="sv" style={{ color: 'var(--teal)' }}>{openEscals.filter(e => (escAckMap[escKey(e)]||[]).length > 0).length}</div>
+                    <div className="sl">ACKNOWLEDGED</div>
+                  </div>
                 </div>
                 <Glass>
                   <SectionHead>Open Escalations</SectionHead>
                   {openEscals.length === 0
                     ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '16px 0' }}>All clear!</div>
-                    : openEscals.map((e, i) => (
-                      <div key={i} style={{ padding: 14, borderRadius: 12, marginBottom: 10, background: e.urgent ? 'rgba(244,63,94,.07)' : 'rgba(245,158,11,.06)', border: `1px solid ${e.urgent ? 'rgba(244,63,94,.25)' : 'rgba(245,158,11,.2)'}` }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 700, fontSize: 14 }}>{e.urgent && '🚨 '}{e.title}</div>
-                            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>{e.agent} · {e.date} {e.time}</div>
-                            {e.detail && <div style={{ fontSize: 13, marginTop: 5, lineHeight: 1.5 }}>{e.detail}</div>}
+                    : openEscals.map((e, i) => {
+                      const key = escKey(e);
+                      const ackedBy = escAckMap[key] || [];
+                      const myAck = ackedBy.includes(user?.name);
+                      return (
+                        <div key={i} style={{ padding: 14, borderRadius: 12, marginBottom: 10, background: e.urgent ? 'rgba(244,63,94,.07)' : 'rgba(245,158,11,.06)', border: `1px solid ${e.urgent ? (ackedBy.length ? 'rgba(244,63,94,.15)' : 'rgba(244,63,94,.25)') : (ackedBy.length ? 'rgba(245,158,11,.12)' : 'rgba(245,158,11,.2)')}` }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                            <div>
+                              <div style={{ fontWeight: 700, fontSize: 14 }}>{e.urgent && '🚨 '}{e.title}</div>
+                              <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>{e.agent} · {e.date} {e.time}</div>
+                              {e.detail && <div style={{ fontSize: 13, marginTop: 5, lineHeight: 1.5 }}>{e.detail}</div>}
+                            </div>
+                            <Chip color={e.urgent ? 'var(--red)' : 'var(--amber)'}>{e.urgent ? 'URGENT' : 'STANDARD'}</Chip>
                           </div>
-                          <Chip color={e.urgent ? 'var(--red)' : 'var(--amber)'}>{e.urgent ? 'URGENT' : 'STANDARD'}</Chip>
+                          {/* Acknowledge row */}
+                          <div style={{ borderTop: '1px solid rgba(255,255,255,.06)', paddingTop: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <div>
+                              {ackedBy.length > 0
+                                ? <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                    {ackedBy.map((name, j) => (
+                                      <span key={j} style={{ padding: '2px 9px', borderRadius: 20, background: 'rgba(34,211,165,.12)', color: 'var(--teal)', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700 }}>✓ {name}</span>
+                                    ))}
+                                  </div>
+                                : <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>No acknowledgement yet</span>
+                              }
+                            </div>
+                            {myAck
+                              ? <span style={{ fontSize: 11, color: 'var(--teal)', fontFamily: 'var(--mono)', fontWeight: 700 }}>✓ YOU ACKNOWLEDGED</span>
+                              : <button className="btn bt" style={{ fontSize: 11, minHeight: 32, padding: '6px 14px' }} onClick={() => doAckEscalation(e)}>✓ ACKNOWLEDGE</button>
+                            }
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                 </Glass>
               </div>
             )}
@@ -1934,7 +2076,7 @@ function AppInner() {
             {anns.length === 0
               ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '32px 0', fontSize: 13 }}>No announcements yet.</div>
               : anns.map((a) => {
-                const isRead = Array.isArray(seenAnns) && seenAnns.includes(a.timestamp);
+                const isRead = Array.isArray(seenAnns) && seenAnns.includes(annId(a));
                 const myAck = acks.some(k => k.annTs === a.timestamp && k.agent === user?.name);
                 const ackList = acks.filter(k => k.annTs === a.timestamp);
                 const isManager = user?.role === ROLE_MANAGER || user?.role === ROLE_FINANCE;
@@ -1952,7 +2094,7 @@ function AppInner() {
                           {!isManager && (
                             myAck
                               ? <span style={{ fontSize: 11, color: 'var(--teal)', fontFamily: 'var(--mono)', fontWeight: 700 }}>✓ ACKNOWLEDGED</span>
-                              : <button className="btn bt" style={{ fontSize: 11, minHeight: 32, padding: '6px 14px' }} onClick={() => { doAcknowledge(a.timestamp); markAnnSeen(a.timestamp); }}>✓ ACKNOWLEDGE</button>
+                              : <button className="btn bt" style={{ fontSize: 11, minHeight: 32, padding: '6px 14px' }} onClick={() => { doAcknowledge(a.timestamp); markAnnSeen(a); }}>✓ ACKNOWLEDGE</button>
                           )}
                           {/* Ack count — visible to everyone, full list to managers */}
                           {ackList.length > 0 && (
