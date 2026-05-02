@@ -20,6 +20,26 @@ const DEPT_HUE = { META:210, KANAL:42, Helpwave:24, Chargeback:355, DMCA:220, MA
 const dc  = d => `hsl(${DEPT_HUE[d]??210},90%,60%)`;
 const dg  = d => `hsl(${DEPT_HUE[d]??210},90%,60%,0.2)`;
 
+// ─────────────────────────────────────────────
+// PH TIMEZONE (UTC+8) — ALL TIMES PINNED HERE
+// ─────────────────────────────────────────────
+const PH_TZ = 'Asia/Manila';
+const phFmt  = (ts, opts) => new Date(ts).toLocaleString('en-PH', { timeZone: PH_TZ, ...opts });
+const phTime      = ts => phFmt(ts, { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+const phTimeShort = ts => phFmt(ts, { hour:'2-digit', minute:'2-digit' });
+const phDateFull  = ts => phFmt(ts, { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+const phDateShort = ts => phFmt(ts, { month:'short', day:'numeric' });
+// Midnight today in PH time as UTC ms timestamp
+const todayMs = () => {
+  const ymd = new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ });
+  return new Date().getTime();
+};
+// YYYY-MM-DD in PH time (filenames / CSV)
+const tsKey = () => new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ });
+// Strings for Google Sheets payloads — always PH time
+const phNowDate = () => new Date().toLocaleDateString('en-PH', { timeZone: PH_TZ });
+const phNowTime = () => new Date().toLocaleTimeString('en-PH', { timeZone: PH_TZ });
+
 // ── SHIFT SCHEDULES ──
 // General teams: Morning / Mid / Night
 // DMCA & Chargeback teams: fixed Office hours
@@ -50,16 +70,18 @@ const resolveShift = label => SHIFT_TEMPLATES.find(s => s.label === label) || SH
 // when evaluating against a clock-in that happened after midnight.
 const schedStart = (shiftLabel, clockInTs) => {
   const shift = resolveShift(shiftLabel);
-  const [sh, sm] = shift.start.split(':').map(Number);
-  const ci = new Date(clockInTs);
-  const ref = new Date(clockInTs);
-  ref.setHours(sh, sm, 0, 0);
-  // If overnight shift and clock-in is in the early morning window (00:00–12:00),
-  // the scheduled start was yesterday at shift.start
-  if (shift.overnight && ci.getHours() < 12) {
-    ref.setDate(ref.getDate() - 1);
+  // Get PH calendar date (YYYY-MM-DD) and PH hour of the clock-in
+  const ciPhDate = new Date(clockInTs).toLocaleDateString('en-CA', { timeZone: PH_TZ });
+  const ciPhHourStr = new Date(clockInTs).toLocaleTimeString('en-PH', { timeZone: PH_TZ, hour:'2-digit', hour12:false });
+  const ciPhHour = parseInt(ciPhHourStr, 10);
+  // Overnight (Night) shift: if PH hour is early morning (00-11),
+  // the scheduled start was the previous PH calendar day
+  let refDate = ciPhDate;
+  if (shift.overnight && ciPhHour < 12) {
+    const prev = new Date(clockInTs - 86400000);
+    refDate = prev.toLocaleDateString('en-CA', { timeZone: PH_TZ });
   }
-  return ref.getTime();
+  return new Date(refDate + 'T' + shift.start + ':00+08:00').getTime();
 };
 
 const STATUS = {
@@ -79,8 +101,6 @@ const AL = { clockIn:'Clock In', clockOut:'Clock Out', breakStart:'Break Start',
 const pad  = n => String(n).padStart(2,'0');
 const fmt  = ms => { if(!ms||ms<0)return'00:00:00'; return `${pad(~~(ms/3_600_000))}:${pad(~~(ms%3_600_000/60_000))}:${pad(~~(ms%60_000/1000))}`; };
 const fmtS = ms => { if(!ms||ms<0)return'0m'; const h=~~(ms/3_600_000),m=~~(ms%3_600_000/60_000); return h?`${h}h ${m}m`:`${m}m`; };
-const todayMs = () => { const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); };
-const tsKey   = () => new Date().toISOString().split('T')[0];
 
 const deriveStatus = (logs, name, rec, isManager=false) => {
   if (isManager) return rec.onCall ? STATUS.ONCALL : STATUS.ONCALL;
@@ -325,14 +345,23 @@ select.inp{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.
 // ─────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────
+// ── LOCALSTORAGE HELPERS (read synchronously before first render) ──────────
+const lsGet = key => { try { const v=localStorage.getItem(key); return v?JSON.parse(v):null; } catch{return null;} };
+const lsSet = (key,val) => { try { localStorage.setItem(key,JSON.stringify(val)); } catch{} };
+const lsDel = key => { try { localStorage.removeItem(key); } catch{} };
+
 export default function App() {
-  // ── core state ──
-  const [view,   setView]   = useState('landing');
+  // ── core state — lazy initialisers read localStorage synchronously so there
+  //    is ZERO flash to the landing page on refresh while logged in ──────────
+  const [view,   setView]   = useState(() => {
+    const u = lsGet('afs_user');
+    return u ? (u.role==='Manager' ? 'mgr' : 'agent') : 'landing';
+  });
+  const [user,   setUser]   = useState(() => lsGet('afs_user'));
+  const [recs,   setRecs]   = useState(() => lsGet('afs_recs') || {});
   const [tab,    setTab]    = useState('attendance');
   const [agents, setAgents] = useState([]);
   const [logs,   setLogs]   = useState([]);
-  const [recs,   setRecs]   = useState({});
-  const [user,   setUser]   = useState(null);
   const [busy,   setBusy]   = useState(false);
   const [now,    setNow]    = useState(Date.now());
 
@@ -388,6 +417,19 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // ── PERSIST SESSION TO LOCALSTORAGE ──────────────────────────────────────
+  // State is already initialised from localStorage synchronously above.
+  // These effects just keep localStorage in sync whenever state changes.
+
+  // Persist recs (clock-in state) — survives refresh, tab close, logout
+  useEffect(() => { lsSet('afs_recs', recs); }, [recs]);
+
+  // Persist / clear user session
+  useEffect(() => {
+    if (user) lsSet('afs_user', user);
+    else      lsDel('afs_user');
+  }, [user]);
+
   const showToast = (msg, kind='ok') => {
     setToast({ msg, kind });
     setTimeout(() => setToast({ msg:'', kind:'ok' }), 3000);
@@ -437,6 +479,26 @@ export default function App() {
 
   useEffect(() => { fetch_(); }, [view, fetch_]);
 
+  // ── ASYNC SERVER-SYNC: re-run rebuild whenever fresh logs arrive ──────────
+  // This backs up the synchronous rebuild in doLogin and also catches changes
+  // that happened on another device (e.g. a manager correcting a clock-in).
+  useEffect(() => {
+    if (!user || user.role === 'Manager') return;
+    const rebuilt = rebuildSession(user.name, logs);
+    if (!rebuilt) return;
+
+    setRecs(prev => {
+      const cur = prev[user.name] || {};
+      // Keep local state if it reflects an action more recent than the last server log
+      // (prevents a sync race overwriting an action that hasn't persisted yet)
+      const lastLogTs = [...logs.filter(l => l.agent === user.name)]
+        .sort((a,b) => b.timestamp - a.timestamp)[0]?.timestamp || 0;
+      if (cur.onBreak && !rebuilt.onBreak && (cur.breakStart || 0) > lastLogTs) return prev;
+      if (cur.clockedOut && !rebuilt.clockedOut) return prev;
+      return { ...prev, [user.name]: rebuilt };
+    });
+  }, [logs, user, rebuildSession]); // eslint-disable-line
+
   const post = (payload) =>
     fetch(HOOK, { method:'POST', mode:'no-cors', body: JSON.stringify(payload) });
 
@@ -457,7 +519,7 @@ export default function App() {
     const loc  = await audit();
     const data = { ...reg, role:mgr?'Manager':'Agent', salary:mgr?PAY(reg.name):0 };
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:mgr?'USER_APPROVE':'USER_REGISTER', agent:reg.name.trim(),
       device:JSON.stringify({ ...data, loc }), timestamp:Date.now()
     });
@@ -468,6 +530,43 @@ export default function App() {
   };
 
   // ── LOGIN ──
+  // ── REBUILD SESSION FROM LOGS (shared between doLogin and the async useEffect) ──
+  const rebuildSession = useCallback((agentName, sourceLogs) => {
+    const today = todayMs();
+    const todayLogs = [...sourceLogs
+      .filter(l => l.agent === agentName && l.timestamp >= today)]
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    if (todayLogs.length === 0) return null;
+
+    // Replay clock events in order.
+    // We take the EARLIEST clockIn of the day as the shift start —
+    // any subsequent clockIn events (from accidental re-logins) are ignored
+    // as long as there was no clockOut between them.
+    let clockIn = null, breakUsedMs = 0, breakStart = null, clockedOut = false;
+    for (const l of todayLogs) {
+      if (l.action === 'clockIn') {
+        // Only reset shift if there was a genuine clockOut before this
+        if (!clockIn || clockedOut) {
+          clockIn = l.timestamp; breakUsedMs = 0; breakStart = null; clockedOut = false;
+        }
+        // else: ignore stray re-clockIn (agent clicked Clock In after logout by mistake)
+      }
+      if (l.action === 'breakStart' && clockIn && !clockedOut) { breakStart = l.timestamp; }
+      if (l.action === 'breakEnd' && breakStart) {
+        breakUsedMs += l.timestamp - breakStart; breakStart = null;
+      }
+      if (l.action === 'clockOut' && clockIn) { clockedOut = true; breakStart = null; }
+    }
+
+    if (!clockIn) return null;
+
+    const rebuilt = { clockIn, breakUsedMs };
+    if (clockedOut) rebuilt.clockedOut = true;
+    if (breakStart) { rebuilt.onBreak = true; rebuilt.breakStart = breakStart; }
+    return rebuilt;
+  }, []); // eslint-disable-line
+
   const doLogin = () => {
     setErr('');
     const found = agents.find(a =>
@@ -475,6 +574,18 @@ export default function App() {
     );
     if (!found) return setErr('Credentials not found.');
     if (found.status === 'pending') return setErr('Account awaiting approval.');
+
+    // ── Synchronous session restore from already-loaded logs ──────────────────
+    // This runs BEFORE the post-login fetch_, so there is zero gap where the
+    // agent sees an empty timer and might click Clock In again by mistake.
+    if (found.role !== 'Manager') {
+      const rebuilt = rebuildSession(found.name, logs);
+      if (rebuilt) {
+        setRecs(prev => ({ ...prev, [found.name]: rebuilt }));
+        if (!rebuilt.clockedOut) showToast('Session restored — clock still running');
+      }
+    }
+
     setUser(found);
     setView(found.role === 'Manager' ? 'mgr' : 'agent');
   };
@@ -491,7 +602,7 @@ export default function App() {
     if (type === 'clockOut')   nx = { clockedOut:true, clockOutTs:ts, totalNet:Math.max(0,(ts-(rec.clockIn||ts))-(rec.breakUsedMs||0)) };
     setRecs(p => ({ ...p, [user.name]:nx }));
     await post({
-      date:new Date(ts).toLocaleDateString(), time:new Date(ts).toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:type, agent:user.name, device:proof, timestamp:ts
     });
     showToast(AL[type] || type);
@@ -504,7 +615,7 @@ export default function App() {
     if (!swapTarget) return showToast('Select a target agent', 'err');
     setBusy(true);
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:'SWAP_REQUEST', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({
         from:user.name, to:swapTarget, fromShift:user.shift||'Morning',
@@ -522,7 +633,7 @@ export default function App() {
   const doSwapDecision = async (req, decision) => {
     setBusy(true);
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:decision==='approve'?'SWAP_APPROVE':'SWAP_DENY', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({ ...req, status:decision==='approve'?'approved':'denied', decidedBy:user.name })
     });
@@ -536,7 +647,7 @@ export default function App() {
     if (!memoText.trim()) return;
     setBusy(true);
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:'MEMO', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({ text:memoText, agent:user.name })
     });
@@ -551,7 +662,7 @@ export default function App() {
     if (!escalTitle.trim()) return showToast('Add a title', 'err');
     setBusy(true);
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:'ESCALATE', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({ title:escalTitle, detail:escalDetail, urgent:escalUrgent, agent:user.name, resolved:false })
     });
@@ -566,7 +677,7 @@ export default function App() {
     if (!annText.trim()) return;
     setBusy(true);
     await post({
-      date:new Date().toLocaleDateString(), time:new Date().toLocaleTimeString(),
+      date:phNowDate(), time:phNowTime(),
       action:'ANNOUNCE', agent:user.name, timestamp:Date.now(),
       device:JSON.stringify({ text:annText, urgent:annUrgent, from:user.name })
     });
@@ -576,17 +687,25 @@ export default function App() {
     setBusy(false);
   };
 
-  const logout = () => { setUser(null); setRecs({}); setView('landing'); };
+  const logout = () => {
+    // We intentionally do NOT clear recs on logout.
+    // If the agent is still clocked in, their session persists in localStorage
+    // and will be restored the next time they log in.
+    setUser(null);
+    setView('landing');
+  };
 
   // ── SESSION CALCS ──
+  // Break is INCLUDED in the 8h shift (7h work + 1h break = 8h total).
+  // sPct and overtime are based on total elapsed (shMs), not net work.
   const rec  = user ? (recs[user.name]||{}) : {};
   const bMs  = (rec.breakUsedMs||0) + (rec.onBreak ? (now-rec.breakStart) : 0);
-  const shMs = rec.clockIn ? (now-rec.clockIn) : 0;
-  const net  = Math.max(0, shMs-bMs);
-  const ot   = Math.max(0, net-SHIFT_GOAL);  // overtime
+  const shMs = rec.clockIn ? (now-rec.clockIn) : 0;  // total elapsed since clock-in
+  const net  = Math.max(0, shMs-bMs);                 // actual work time (display only)
+  const ot   = Math.max(0, shMs-SHIFT_GOAL);          // overtime = total elapsed > 8h
   const bOvr = bMs > BREAK_MAX;
   const bPct = Math.min(bMs/BREAK_MAX*100, 100);
-  const sPct = Math.min(net/SHIFT_GOAL*100, 100);
+  const sPct = Math.min(shMs/SHIFT_GOAL*100, 100);    // shift % = total elapsed / 8h
 
   const agentSt = user?.role==='Manager' ? STATUS.ONCALL :
     rec.onBreak ? STATUS.BREAK : (rec.clockIn && !rec.clockedOut) ? STATUS.ACTIVE : STATUS.PENDING;
@@ -605,11 +724,11 @@ export default function App() {
       });
       const r=recs[agent.name]||{}, ab=r.onBreak?(now-(r.breakStart||now)):0;
       const totB=tb+(r.breakUsedMs||0)+ab, sMs=ci?((co||now)-ci):0, nMs=Math.max(0,sMs-totB);
-      const otMs=Math.max(0,nMs-SHIFT_GOAL);
+      const otMs=Math.max(0,sMs-SHIFT_GOAL);  // overtime on total elapsed
       const lateMs=ci?Math.max(0,ci-(schedStart(agent.shift||'Morning',ci)+LATE_GRACE)):0;
       return { ...agent, ci, co, totB, sMs, nMs, otMs, tl,
         status:deriveStatus(logs,agent.name,r,agent.role==='Manager'),
-        bOvr:totB>BREAK_MAX, sPct:Math.min(nMs/SHIFT_GOAL*100,100),
+        bOvr:totB>BREAK_MAX, sPct:Math.min(sMs/SHIFT_GOAL*100,100),  // % of total elapsed
         bPct:Math.min(totB/BREAK_MAX*100,100), lateMs };
     })
   , [agents,logs,recs,now]);
@@ -621,7 +740,7 @@ export default function App() {
     return agList.map(agent => {
       const agLogs = logs.filter(l=>l.agent===agent.name);
       const days = {};
-      agLogs.forEach(l => { const d=new Date(l.timestamp).toLocaleDateString(); if(!days[d])days[d]=[]; days[d].push(l); });
+      agLogs.forEach(l => { const d=new Date(l.timestamp).toLocaleDateString('en-CA',{timeZone:PH_TZ}); if(!days[d])days[d]=[]; days[d].push(l); });
       const dayCount=Object.keys(days).length||1;
       let totalNet=0, totalBreak=0, lateDays=0, missedDays=0;
       Object.values(days).forEach(dl => {
@@ -676,8 +795,8 @@ export default function App() {
     const rows=[['Agent','Dept','Clock In','Clock Out','Break','Net Work','Overtime','Shift%','Status','Late']];
     attend.forEach(a=>rows.push([
       a.name,a.platform,
-      a.ci?new Date(a.ci).toLocaleTimeString():'-',
-      a.co?new Date(a.co).toLocaleTimeString():'-',
+      a.ci?phTimeShort(a.ci):'-',
+      a.co?phTimeShort(a.co):'-',
       fmtS(a.totB),fmtS(a.nMs),fmtS(a.otMs),
       `${a.sPct.toFixed(0)}%`,a.status.label,
       a.lateMs>0?fmtS(a.lateMs):'-'
@@ -687,8 +806,8 @@ export default function App() {
     a.download=`attendance_${tsKey()}.csv`; a.click();
   };
 
-  const timeLabel = new Date(now).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  const dateLabel = new Date(now).toLocaleDateString('en-PH',{weekday:'short',month:'short',day:'numeric',year:'numeric'});
+  const timeLabel = new Date(now).toLocaleTimeString('en-PH',{timeZone:PH_TZ,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const dateLabel = new Date(now).toLocaleDateString('en-PH',{timeZone:PH_TZ,weekday:'short',month:'short',day:'numeric',year:'numeric'});
 
   // ─────────────────────────────────────────────
   // RENDER
@@ -806,6 +925,28 @@ export default function App() {
         {view==='agent'&&user&&(
           <div style={{display:'flex',flexDirection:'column',gap:18,width:'100%',paddingTop:4}}>
 
+            {/* SESSION ACTIVE BANNER — always visible while clocked in so agents never wonder if the clock stopped */}
+            {rec.clockIn && !rec.clockedOut && (
+              <div style={{padding:'11px 16px',borderRadius:12,
+                background:'rgba(34,211,165,0.07)',border:'1px solid rgba(34,211,165,0.25)',
+                display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}}>
+                <div style={{display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{fontSize:15}}>🟢</span>
+                  <div>
+                    <div style={{color:'var(--teal)',fontFamily:'var(--mono)',fontSize:11,fontWeight:700,letterSpacing:1}}>
+                      SHIFT IN PROGRESS
+                    </div>
+                    <div style={{fontSize:11,color:'var(--sub)',marginTop:2,fontFamily:'var(--mono)'}}>
+                      Clocked in at {phTimeShort(rec.clockIn)} · Clock runs even when logged out
+                    </div>
+                  </div>
+                </div>
+                <div style={{fontFamily:'var(--mono)',fontSize:13,fontWeight:700,color:'var(--teal)'}}>
+                  {fmt(shMs)}
+                </div>
+              </div>
+            )}
+
             {/* ANNOUNCEMENTS BANNER */}
             {announcements.slice(0,2).map((a,i)=>(
               <div key={i} className={`announce-card${a.urgent?' announce-urgent':''}`}>
@@ -845,19 +986,19 @@ export default function App() {
                   <Ring pct={sPct} size={100} stroke={7} color={rec.onBreak?'var(--amber)':'var(--teal)'}>
                     <div style={{textAlign:'center'}}>
                       <div style={{fontFamily:'var(--mono)',fontSize:11,fontWeight:700,color:rec.onBreak?'var(--amber)':'var(--teal)'}}>
-                        {rec.clockIn?`${~~(net/3_600_000)}h${pad(~~(net%3_600_000/60_000))}m`:'—'}
+                        {rec.clockIn?`${~~(shMs/3_600_000)}h${pad(~~(shMs%3_600_000/60_000))}m`:'—'}
                       </div>
                     </div>
                   </Ring>
                   <div style={{flex:1,minWidth:140}}>
                     <div className="bigtimer" style={{fontSize:'clamp(30px,6vw,52px)',color:rec.onBreak?'var(--amber)':'var(--teal)'}}>
-                      {rec.onBreak?fmt(now-rec.breakStart):rec.clockIn?fmt(net):'--:--:--'}
+                      {rec.onBreak?fmt(now-rec.breakStart):rec.clockIn?fmt(shMs):'--:--:--'}
                     </div>
                     <div style={{fontSize:10,color:'var(--sub)',marginTop:5,fontFamily:'var(--mono)'}}>
-                      {rec.onBreak?'CURRENT BREAK':rec.clockIn?'NET WORK TIME':'NOT CLOCKED IN'}
+                      {rec.onBreak?'CURRENT BREAK':rec.clockIn?'SHIFT ELAPSED':'NOT CLOCKED IN'}
                     </div>
                     {rec.clockIn&&<div style={{fontSize:10,color:'var(--sub)',marginTop:2,fontFamily:'var(--mono)'}}>
-                      In since {new Date(rec.clockIn).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})}
+                      In since {phTimeShort(rec.clockIn)}
                     </div>}
                     {ot>0&&<div style={{fontSize:11,color:'var(--purple)',marginTop:4,fontFamily:'var(--mono)',fontWeight:700}}>
                       +{fmtS(ot)} overtime
@@ -869,7 +1010,7 @@ export default function App() {
                 {rec.clockIn&&<>
                   <div style={{marginBottom:10}}>
                     <div style={{display:'flex',justifyContent:'space-between',fontSize:11,fontFamily:'var(--mono)',color:'var(--sub)',marginBottom:5}}>
-                      <span>SHIFT</span><span style={{color:sPct>=100?'var(--teal)':'var(--text)'}}>{fmt(net)} / 8h</span>
+                      <span>SHIFT ELAPSED</span><span style={{color:sPct>=100?'var(--teal)':'var(--text)'}}>{fmt(shMs)} / 8h</span>
                     </div>
                     <div className="pbar"><div className="pfill" style={{width:`${sPct}%`,background:sPct>=100?'var(--teal)':'linear-gradient(90deg,var(--blue),var(--teal))'}}/></div>
                   </div>
@@ -885,19 +1026,34 @@ export default function App() {
                 {sPct>=100&&!rec.clockedOut&&<div className="alert aok" style={{marginBottom:10}}>✓ 8h target reached! +{fmtS(ot)} OT</div>}
 
                 {/* Clock buttons */}
+                {/* While busy (post-login fetch), Clock In is shielded to prevent accidental double clock-in */}
                 <div className="actg">
-                  <button className="btn bt" disabled={!(!rec.clockIn||rec.clockedOut)} onClick={()=>doAction('clockIn')}>▶ CLOCK IN</button>
+                  <button className="btn bt"
+                    disabled={busy || !(!rec.clockIn||rec.clockedOut)}
+                    style={{position:'relative',overflow:'hidden'}}
+                    onClick={()=>doAction('clockIn')}>
+                    {busy && !rec.clockIn
+                      ? <span style={{fontSize:11,letterSpacing:1}}>⏳ LOADING...</span>
+                      : '▶ CLOCK IN'
+                    }
+                  </button>
                   <button className="btn br" disabled={!(rec.clockIn&&!rec.onBreak&&!rec.clockedOut)} onClick={()=>doAction('clockOut')}>■ CLOCK OUT</button>
                   <button className="btn ba s2" disabled={!(rec.clockIn&&!rec.clockedOut)} onClick={()=>doAction(rec.onBreak?'breakEnd':'breakStart')}>
                     {rec.onBreak?'▶ RESUME WORK':'⏸ START BREAK'}
                   </button>
                 </div>
+                {/* Reassurance message while session is loading */}
+                {busy && !rec.clockIn && (
+                  <div style={{textAlign:'center',fontSize:11,color:'var(--sub)',fontFamily:'var(--mono)',letterSpacing:1,marginTop:4}}>
+                    Checking your shift status...
+                  </div>
+                )}
 
                 {/* Mini stats */}
                 {rec.clockIn&&<div className="g3" style={{marginTop:12}}>
-                  <MiniStat label="GROSS"    value={fmt(shMs)} color="var(--text)"/>
+                  <MiniStat label="ELAPSED"  value={fmt(shMs)} color="var(--teal)"/>
                   <MiniStat label="BREAK"    value={fmt(bMs)}  color={bOvr?'var(--red)':'var(--amber)'}/>
-                  <MiniStat label="NET WORK" value={fmt(net)}  color="var(--teal)"/>
+                  <MiniStat label="WORKING"  value={fmt(net)}  color="var(--sub)"/>
                 </div>}
               </Glass>
 
@@ -937,7 +1093,7 @@ export default function App() {
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
                     <div style={{fontWeight:800,fontSize:14}}>Today's Timeline</div>
                     <span style={{fontSize:10,color:'var(--sub)',fontFamily:'var(--mono)'}}>
-                      {new Date().toLocaleDateString('en-PH',{month:'short',day:'numeric'})}
+                      {phDateShort(Date.now())}
                     </span>
                   </div>
                   {logs.filter(l=>l.agent===user.name&&l.timestamp>=todayMs()).sort((a,b)=>a.timestamp-b.timestamp).length===0
@@ -1033,7 +1189,7 @@ export default function App() {
                         <div className="an">{a.name}</div>
                         <div className="ad" style={{color:dc(a.platform)}}>◆ {a.platform} · {resolveShift(a.shift||'Morning').label} ({resolveShift(a.shift||'Morning').start}–{resolveShift(a.shift||'Morning').end})</div>
                         {a.ci&&<div style={{fontSize:10,color:'var(--sub)',fontFamily:'var(--mono)',marginTop:2}}>
-                          IN {new Date(a.ci).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'})}
+                          IN {phTimeShort(a.ci)}
                           {a.lateMs>0&&<span style={{color:'var(--amber)',marginLeft:6}}>⚠ {fmtS(a.lateMs)} late</span>}
                           {a.otMs>0&&<span style={{color:'var(--purple)',marginLeft:6}}>+{fmtS(a.otMs)} OT</span>}
                         </div>}
@@ -1053,7 +1209,7 @@ export default function App() {
                 {memos.length>0&&(
                   <Glass>
                     <div style={{fontWeight:800,fontSize:14,marginBottom:14}}>📝 Shift Memos Today</div>
-                    {memos.filter(m=>{const d=new Date(m.timestamp);const t=new Date();return d.toLocaleDateString()===t.toLocaleDateString();}).slice(0,5).map((m,i)=>(
+                    {memos.filter(m=>{const mDay=new Date(m.timestamp).toLocaleDateString('en-CA',{timeZone:PH_TZ});const tDay=new Date().toLocaleDateString('en-CA',{timeZone:PH_TZ});return mDay===tDay;}).slice(0,5).map((m,i)=>(
                       <div key={i} style={{padding:'10px 0',borderBottom:'1px solid rgba(255,255,255,.05)',fontSize:13}}>
                         <div style={{display:'flex',justifyContent:'space-between',fontSize:10,fontFamily:'var(--mono)',color:'var(--sub)',marginBottom:4}}>
                           <span style={{color:dc(agents.find(a=>a.name===m.agent)?.platform)}}>{m.agent}</span>
@@ -1329,7 +1485,7 @@ export default function App() {
                       </div>
                       <button className="btn bt" style={{fontSize:11}} onClick={async()=>{
                         if(!sal)return alert('Assign salary first.');
-                        await post({date:new Date().toLocaleDateString(),time:new Date().toLocaleTimeString(),
+                        await post({date:phNowDate(),time:phNowTime(),
                           action:'USER_APPROVE',agent:a.name,device:JSON.stringify({...a,salary:Number(sal)}),timestamp:Date.now()});
                         fetch_();
                       }}>ACTIVATE</button>
@@ -1365,7 +1521,7 @@ export default function App() {
               </Ring>
             </div>
             <div className="g3" style={{marginBottom:14}}>
-              <MiniStat label="CLOCK IN"  value={modal.ci?new Date(modal.ci).toLocaleTimeString('en-PH',{hour:'2-digit',minute:'2-digit'}):'—'}/>
+              <MiniStat label="CLOCK IN"  value={modal.ci?phTimeShort(modal.ci):'—'}/>
               <MiniStat label="BREAK"     value={fmtS(modal.totB)} color={modal.bOvr?'var(--red)':'var(--amber)'}/>
               <MiniStat label="NET WORK"  value={fmt(modal.nMs)}   color="var(--teal)"/>
             </div>
