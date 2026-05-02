@@ -547,7 +547,8 @@ function AppInner() {
     const rebuilt = { clockIn, breakUsedMs, pauseUsedMs };
     if (clockedOut) {
       rebuilt.clockedOut = true;
-      const coLog = todayLogs.filter(l => l.action === 'clockOut').pop();
+      // FIX: was `todayLogs` (undefined). The local sorted list is `tl`.
+      const coLog = tl.filter(l => l.action === 'clockOut').pop();
       if (coLog) rebuilt.clockOutTs = coLog.timestamp;
     }
     if (breakStart) { rebuilt.onBreak = true; rebuilt.breakStart = breakStart; }
@@ -582,7 +583,21 @@ function AppInner() {
         .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
         .sort((a, b) => b.timestamp - a.timestamp);
 
-      const parse = row => { try { return { ...row, ...JSON.parse(row.device) }; } catch { return row; } };
+      // HARDENED parse: strip protected row-level keys from device JSON before merging.
+      // This prevents a serialized `action`/`agent`/`timestamp` etc. inside `device`
+      // from shadowing the real row fields when we read it back.
+      const PROTECTED_KEYS = ['action','agent','timestamp','date','time','device'];
+      const parse = row => {
+        try {
+          const extras = JSON.parse(row.device);
+          if (!extras || typeof extras !== 'object') return row;
+          const safe = {};
+          for (const k of Object.keys(extras)) {
+            if (!PROTECTED_KEYS.includes(k)) safe[k] = extras[k];
+          }
+          return { ...row, ...safe };
+        } catch { return row; }
+      };
       const swaps = d.filter(i => ['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY'].includes(i.action)).map(parse);
       const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const escs_  = d.filter(i => i.action === 'ESCALATE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
@@ -738,12 +753,27 @@ function AppInner() {
     await fetch_(); setBusy(false);
   };
 
+  // FIX: explicit whitelist of fields placed into device JSON so the decision
+  // record never carries a stale `action: 'SWAP_REQUEST'`. We also stash the
+  // original request's timestamp as `reqTimestamp` so swapKey() can match
+  // request ↔ decision regardless of when each row was written.
   const doSwapDecision = async (req, decision) => {
     setBusy(true);
     await post({
-      date: phNowDate(), time: phNowTime(), action: decision === 'approve' ? 'SWAP_APPROVE' : 'SWAP_DENY',
+      date: phNowDate(), time: phNowTime(),
+      action: decision === 'approve' ? 'SWAP_APPROVE' : 'SWAP_DENY',
       agent: user.name, timestamp: Date.now(),
-      device: JSON.stringify({ ...req, status: decision === 'approve' ? 'approved' : 'denied', decidedBy: user.name }),
+      device: JSON.stringify({
+        from: req.from,
+        to: req.to,
+        fromShift: req.fromShift,
+        toShift: req.toShift,
+        platform: req.platform,
+        note: req.note,
+        reqTimestamp: req.timestamp,
+        status: decision === 'approve' ? 'approved' : 'denied',
+        decidedBy: user.name,
+      }),
     });
     showToast(decision === 'approve' ? 'Swap approved!' : 'Swap denied.');
     await fetch_(); setBusy(false);
@@ -965,11 +995,13 @@ function AppInner() {
       a.platform === user?.platform
     ), [agents, user]);
 
-  // Stable key for matching a request to its decision record
-  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.timestamp||''}`;
+  // Stable key for matching a request to its decision record.
+  // Decisions carry `reqTimestamp` (the original request's timestamp) so they
+  // resolve to the same key as the request. Fallback to `timestamp` for raw requests.
+  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.reqTimestamp || s.timestamp || ''}`;
 
   const pendingSwaps = useMemo(() => {
-    // Build set of swap keys that already have a APPROVE or DENY decision
+    // Build set of swap keys that already have an APPROVE or DENY decision
     const decided = new Set(
       swapReqs
         .filter(s => s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY')
