@@ -500,6 +500,9 @@ function AppInner() {
   // Finance has its own tab system (payroll / refunds)
   const [financeTab, setFinanceTab] = useState('payroll');
 
+  // KPI tab has sub-tabs to focus on a single platform
+  const [kpiSubTab, setKpiSubTab] = useState('all'); // 'all' | 'meta' | 'kanal' | 'helpwave' | 'refund'
+
   // ── swap / memo / escalate / announce ──
   const [swapTarget, setSwapTarget] = useState('');
   const [swapNote,   setSwapNote]   = useState('');
@@ -1903,13 +1906,44 @@ function AppInner() {
 
             {/* KPI DASHBOARDS — META / Kanal / Helpwave / Refund + Productivity */}
             {tab === 'kpi' && (
-              <KpiPanel
-                data={kpiData} loading={kpiLoading} error={kpiError} loaded={kpiLoaded} fetchedAt={kpiFetchedAt}
-                onRefresh={fetchDashboards}
-                productivity={productivityRows}
-                agents={agents}
-                showRefund showProductivity showAllPlatforms
-              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Sub-tab strip — focus the view on a single platform */}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,.06)' }}>
+                  {[
+                    { id: 'all',      label: 'ALL' },
+                    { id: 'meta',     label: 'META' },
+                    { id: 'kanal',    label: 'KANAL' },
+                    { id: 'helpwave', label: 'HELPWAVE' },
+                    { id: 'refund',   label: '💸 REFUND' },
+                  ].map(s => {
+                    const on = kpiSubTab === s.id;
+                    return (
+                      <button key={s.id}
+                        onClick={() => setKpiSubTab(s.id)}
+                        style={{
+                          padding: '7px 14px', borderRadius: 20, fontSize: 11, fontWeight: 700, letterSpacing: 1.5,
+                          fontFamily: 'var(--mono)', cursor: 'pointer', minHeight: 34, transition: 'all .15s',
+                          background: on ? 'rgba(34,211,165,.15)' : 'rgba(255,255,255,.04)',
+                          color: on ? 'var(--teal)' : 'var(--sub)',
+                          border: `1px solid ${on ? 'rgba(34,211,165,.35)' : 'rgba(255,255,255,.08)'}`,
+                        }}>
+                        {s.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <KpiPanel
+                  data={kpiData} loading={kpiLoading} error={kpiError} loaded={kpiLoaded} fetchedAt={kpiFetchedAt}
+                  onRefresh={fetchDashboards}
+                  productivity={productivityRows}
+                  agents={agents}
+                  showProductivity
+                  showMeta={kpiSubTab === 'all' || kpiSubTab === 'meta'}
+                  showKanal={kpiSubTab === 'all' || kpiSubTab === 'kanal'}
+                  showHelpwave={kpiSubTab === 'all' || kpiSubTab === 'helpwave'}
+                  showRefund={kpiSubTab === 'all' || kpiSubTab === 'refund'}
+                />
+              </div>
             )}
 
             {/* SWAPS */}
@@ -2856,7 +2890,7 @@ function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPaySt
 // Stays defensive: every block is independently null-checkable so a missing
 // named range only blanks that one card, never the whole panel.
 // ─────────────────────────────────────────────────────────────────────────────
-function KpiPanel({ data, loading, error, loaded, fetchedAt, onRefresh, productivity, agents, showRefund, showProductivity, showAllPlatforms }) {
+function KpiPanel({ data, loading, error, loaded, fetchedAt, onRefresh, productivity, agents, showRefund, showProductivity, showMeta, showKanal, showHelpwave }) {
 
   // Helpers — every read is null-safe
   const getRange = (platform, key) => {
@@ -2974,48 +3008,50 @@ function KpiPanel({ data, loading, error, loaded, fetchedAt, onRefresh, producti
       )}
 
       {/* ── PER-PLATFORM DASHBOARDS ─────────────────────────────────────── */}
-      {showAllPlatforms && (
-        <>
-          <PlatformCard
-            label="META" hue={210}
-            todayValue={getCell('meta', 'today_total')}
-            todayLabel="TICKETS TODAY"
-            agentTracking={getRange('meta', 'agent_tracking')}
-            caseMatrices={[
-              { title: 'By Agent', data: getRange('meta', 'case_matrix_by_agent') },
-              { title: 'By Country', data: getRange('meta', 'case_matrix_by_country') },
-            ]}
-            fmtNum={fmtNum} agents={agents}
-          />
-          <PlatformCard
-            label="KANAL" hue={42}
-            todayValue={getCell('kanal', 'today_total')}
-            todayLabel="CONVERSATIONS TODAY"
-            agentTracking={getRange('kanal', 'agent_tracking')}
-            extraSummary={getRange('kanal', 'refunds_summary')}
-            extraSummaryTitle="Refunds Summary"
-            caseMatrices={[
-              { title: 'By Agent', data: getRange('kanal', 'case_matrix_by_agent') },
-              { title: 'By Country', data: getRange('kanal', 'case_matrix_by_country') },
-            ]}
-            fmtNum={fmtNum} agents={agents}
-          />
-          <PlatformCard
-            label="HELPWAVE" hue={24}
-            todayValue={getCell('helpwave', 'daily_total')}
-            todayLabel="TICKETS CLOSED TODAY"
-            secondaryValue={getCell('helpwave', 'weekly_total')}
-            secondaryLabel="THIS WEEK"
-            agentTracking={getRange('helpwave', 'agent_tracking')}
-            extraSummary={getRange('helpwave', 'refunds_totals')}
-            extraSummaryTitle="Refund Totals"
-            caseMatrices={[
-              { title: 'By Agent', data: getRange('helpwave', 'case_matrix_by_agent') },
-              { title: 'By Country', data: getRange('helpwave', 'case_matrix_by_country') },
-            ]}
-            fmtNum={fmtNum} agents={agents}
-          />
-        </>
+      {showMeta && (
+        <PlatformCard
+          label="META" hue={210}
+          todayValue={getCell('meta', 'today_total')}
+          todayLabel="TICKETS TODAY"
+          agentTracking={getRange('meta', 'agent_tracking')}
+          caseMatrices={[
+            { title: 'By Agent', data: getRange('meta', 'case_matrix_by_agent') },
+            { title: 'By Country', data: getRange('meta', 'case_matrix_by_country') },
+          ]}
+          fmtNum={fmtNum} agents={agents}
+        />
+      )}
+      {showKanal && (
+        <PlatformCard
+          label="KANAL" hue={42}
+          todayValue={getCell('kanal', 'today_total')}
+          todayLabel="CONVERSATIONS TODAY"
+          agentTracking={getRange('kanal', 'agent_tracking')}
+          extraSummary={getRange('kanal', 'refunds_summary')}
+          extraSummaryTitle="Refunds Summary"
+          caseMatrices={[
+            { title: 'By Agent', data: getRange('kanal', 'case_matrix_by_agent') },
+            { title: 'By Country', data: getRange('kanal', 'case_matrix_by_country') },
+          ]}
+          fmtNum={fmtNum} agents={agents}
+        />
+      )}
+      {showHelpwave && (
+        <PlatformCard
+          label="HELPWAVE" hue={24}
+          todayValue={getCell('helpwave', 'daily_total')}
+          todayLabel="TICKETS CLOSED TODAY"
+          secondaryValue={getCell('helpwave', 'weekly_total')}
+          secondaryLabel="THIS WEEK"
+          agentTracking={getRange('helpwave', 'agent_tracking')}
+          extraSummary={getRange('helpwave', 'refunds_totals')}
+          extraSummaryTitle="Refund Totals"
+          caseMatrices={[
+            { title: 'By Agent', data: getRange('helpwave', 'case_matrix_by_agent') },
+            { title: 'By Country', data: getRange('helpwave', 'case_matrix_by_country') },
+          ]}
+          fmtNum={fmtNum} agents={agents}
+        />
       )}
 
       {/* ── REFUND DASHBOARD ────────────────────────────────────────────── */}
