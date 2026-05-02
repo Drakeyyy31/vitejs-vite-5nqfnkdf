@@ -135,6 +135,42 @@ const pad  = n => String(n).padStart(2, '0');
 const fmt  = ms => { if (!ms || ms < 0) return '00:00:00'; return `${pad(~~(ms / 3_600_000))}:${pad(~~(ms % 3_600_000 / 60_000))}:${pad(~~(ms % 60_000 / 1_000))}`; };
 const fmtS = ms => { if (!ms || ms < 0) return '0m'; const h = ~~(ms / 3_600_000), m = ~~(ms % 3_600_000 / 60_000); return h ? `${h}h ${m}m` : `${m}m`; };
 const currency = n => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const eur      = n => `€${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+// Fuzzy header lookup — survives column renames as long as the keyword is still in the header.
+const findField = (row, ...patterns) => {
+  if (!row) return '';
+  const keys = Object.keys(row);
+  for (const p of patterns) {
+    const target = String(p).toUpperCase();
+    const k = keys.find(k => String(k).toUpperCase().includes(target));
+    if (k && row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+  }
+  return '';
+};
+
+// Normalize a refund-sheet row into a stable shape regardless of small header drift.
+const normalizeRefund = row => {
+  const dRaw = findField(row, 'DATE OF REQUEST', 'DATE');
+  let dts = 0;
+  if (dRaw) { const d = new Date(dRaw); if (!isNaN(d.getTime())) dts = d.getTime(); }
+  return {
+    shop:         String(findField(row, 'SHOP') || '').trim(),
+    origin:       String(findField(row, 'ORIGIN') || '').trim(),
+    orderNo:      String(findField(row, 'ORDER #', 'ORDER NO', 'ORDER NUMBER') || '').trim(),
+    customer:     String(findField(row, 'CUSTOMER NAME', 'CUSTOMER') || '').trim(),
+    refundType:   String(findField(row, 'REFUND TYPE') || '').trim(),
+    refundAmount: Number(findField(row, 'REFUND AMOUNT', 'REFUND AMT')) || 0,
+    agent:        String(findField(row, 'REQUESTED BY') || '').trim(),
+    dateRaw:      dRaw,
+    dateTs:       dts,
+    status:       String(findField(row, 'STATUS') || '').trim(),
+    error:        Boolean(findField(row, 'ERROR')) && String(findField(row, 'ERROR')).toLowerCase() !== 'false',
+    currency:     String(findField(row, 'CC', 'CURRENCY') || '').trim().toUpperCase(),
+    eurAmount:    Number(findField(row, 'EUR')) || 0,
+    note:         String(findField(row, 'NOTE') || '').trim(),
+  };
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENTS
@@ -452,6 +488,18 @@ function AppInner() {
   const [payStart,  setPayStart]  = useState(tsKey());
   const [payEnd,    setPayEnd]    = useState(tsKey());
 
+  // ── KPI dashboards (META / Kanal / Helpwave / Refund) ──
+  // All four dashboards are read from named ranges in their respective sheets
+  // via Apps Script ?source=dashboards. Lazy-loaded on tab open.
+  const [kpiData,    setKpiData]    = useState(null);
+  const [kpiLoaded,  setKpiLoaded]  = useState(false);
+  const [kpiLoading, setKpiLoading] = useState(false);
+  const [kpiError,   setKpiError]   = useState('');
+  const [kpiFetchedAt, setKpiFetchedAt] = useState(0);
+
+  // Finance has its own tab system (payroll / refunds)
+  const [financeTab, setFinanceTab] = useState('payroll');
+
   // ── swap / memo / escalate / announce ──
   const [swapTarget, setSwapTarget] = useState('');
   const [swapNote,   setSwapNote]   = useState('');
@@ -666,6 +714,41 @@ function AppInner() {
     } catch (e) { console.error(e); }
     setBusy(false);
   }, []);
+
+  // ── KPI DASHBOARDS FETCH ──────────────────────────────────────────────
+  // Reads named ranges from META / Kanal / Helpwave / Refund spreadsheets
+  // via the Apps Script endpoint. Lazy: only runs when a KPI tab is opened.
+  // Returns shape: { meta: {today_total, agent_tracking, ...}, kanal: {...}, ... }
+  // Each leaf is a 2D array of cell values, OR { _error: '...' } on failure.
+  const fetchDashboards = useCallback(async () => {
+    setKpiLoading(true);
+    setKpiError('');
+    try {
+      const url = `${HOOK}${HOOK.includes('?') ? '&' : '?'}source=dashboards`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const raw = await resp.json();
+      if (raw && raw.error) throw new Error(raw.error);
+      if (!raw || typeof raw !== 'object') throw new Error('Unexpected response — check Apps Script deployment.');
+      setKpiData(raw);
+      setKpiLoaded(true);
+      setKpiFetchedAt(Date.now());
+    } catch (e) {
+      setKpiError(String(e.message || e));
+    }
+    setKpiLoading(false);
+  }, []);
+
+  // Auto-load when manager opens KPI tab or finance opens refunds tab
+  useEffect(() => {
+    const onKpiTab = (view === 'mgr' && tab === 'kpi') || (view === 'finance' && financeTab === 'refunds');
+    if (onKpiTab && !kpiLoaded && !kpiLoading && !kpiError) fetchDashboards();
+  }, [view, tab, financeTab, kpiLoaded, kpiLoading, kpiError, fetchDashboards]);
+
+  // Agents loading their own stats also need kpi data to see today's ticket count
+  useEffect(() => {
+    if (statsModal && !kpiLoaded && !kpiLoading && !kpiError) fetchDashboards();
+  }, [statsModal, kpiLoaded, kpiLoading, kpiError, fetchDashboards]);
 
   useEffect(() => { fetch_(); }, [view, fetch_]);
 
@@ -954,6 +1037,7 @@ function AppInner() {
           platform: editForm.platform,
           shift: finalShift,
           salary,
+          kpiName: editForm.kpiName || '',
           updatedBy: user?.name,
         }),
       });
@@ -1129,6 +1213,47 @@ function AppInner() {
     const last14 = calcPayroll([user], fortnightFrom, fortnightTo)[0];
     return { week, month, last14 };
   }, [user, calcPayroll]);
+
+  // ── PRODUCTIVITY ──────────────────────────────────────────────────────
+  // Joins each agent's hours-clocked-today (from attendance) with their
+  // tickets-handled-today (from the platform's KPI agent_tracking grid).
+  // This is the cross-cutting view neither Sheets nor the raw KPI dashboards
+  // can produce — hours data lives only here.
+  const kpiAgentMatch = useCallback((agent, platformKey) => {
+    if (!kpiData || !kpiData[platformKey] || !kpiData[platformKey].agent_tracking) return null;
+    const grid = kpiData[platformKey].agent_tracking;
+    if (grid && grid._error) return null;
+    if (!Array.isArray(grid) || grid.length < 2) return null;
+    // Find the column that holds today's day-of-week. The header row labels
+    // weekdays (MONDAY .. SUNDAY); we match by the full PH-day name.
+    const header = grid[0].map(h => String(h || '').trim().toUpperCase());
+    const todayName = DAY_NAMES[todayDowPH()].toUpperCase(); // SUNDAY..SATURDAY
+    const todayCol = header.findIndex(h => h === todayName);
+    if (todayCol < 1) return null;
+    // First column is the agent name. Match case-insensitive trim.
+    const wanted = String(agent.kpiName || agent.name || '').trim().toUpperCase();
+    if (!wanted) return null;
+    for (let i = 1; i < grid.length; i++) {
+      const rowName = String(grid[i][0] || '').trim().toUpperCase();
+      if (rowName === wanted) {
+        const v = grid[i][todayCol];
+        const n = typeof v === 'number' ? v : Number(v);
+        return isFinite(n) ? n : 0;
+      }
+    }
+    return null; // Not in the dashboard agent list
+  }, [kpiData]);
+
+  const productivityRows = useMemo(() => {
+    if (!kpiData || !attend.length) return [];
+    return attend.map(a => {
+      const platformKey = String(a.platform || '').toLowerCase();
+      const tickets = kpiAgentMatch(a, platformKey);
+      const hoursWorked = (a.nMs || 0) / 3_600_000;
+      const ratio = hoursWorked > 0 && tickets !== null ? tickets / hoursWorked : null;
+      return { ...a, ticketsToday: tickets, hoursWorked, ratio, matched: tickets !== null };
+    });
+  }, [attend, kpiData, kpiAgentMatch]);
 
   // ── SWAP ELIGIBILITY — same platform AND same shift ──
   const swapEligible = useMemo(() =>
@@ -1623,11 +1748,29 @@ function AppInner() {
               </div>
             </div>
 
-            {/* Payroll section directly */}
-            <PayrollPanel payrollData={payrollData} payPeriod={payPeriod} setPayPeriod={setPayPeriod}
-              payStart={payStart} setPayStart={setPayStart} payEnd={payEnd} setPayEnd={setPayEnd}
-              payRange={payRange} exportPayCSV={exportPayCSV} setPayModal={setPayModal}
-              agents={agents} logs={logs} />
+            <div className="tabs">
+              {['payroll','refunds'].map(t => (
+                <button key={t} className={`btn-tab${financeTab === t ? ' on' : ''}`} onClick={() => setFinanceTab(t)}>
+                  {t === 'refunds' ? '💸 REFUNDS' : 'PAYROLL'}
+                </button>
+              ))}
+            </div>
+
+            {financeTab === 'payroll' && (
+              <PayrollPanel payrollData={payrollData} payPeriod={payPeriod} setPayPeriod={setPayPeriod}
+                payStart={payStart} setPayStart={setPayStart} payEnd={payEnd} setPayEnd={setPayEnd}
+                payRange={payRange} exportPayCSV={exportPayCSV} setPayModal={setPayModal}
+                agents={agents} logs={logs} />
+            )}
+            {financeTab === 'refunds' && (
+              <KpiPanel
+                data={kpiData} loading={kpiLoading} error={kpiError} loaded={kpiLoaded} fetchedAt={kpiFetchedAt}
+                onRefresh={fetchDashboards}
+                productivity={[]}
+                agents={agents}
+                showRefund
+              />
+            )}
           </div>
         )}
 
@@ -1664,12 +1807,13 @@ function AppInner() {
             </div>
 
             <div className="tabs">
-              {['attendance','payroll','swaps','escalations','schedule','team','logs','onboarding'].map(t => {
+              {['attendance','payroll','kpi','swaps','escalations','schedule','team','logs','onboarding'].map(t => {
                 const pendingCount = agents.filter(a => a.status === 'pending').length;
                 let label = t.toUpperCase();
                 if (t === 'swaps' && pendingSwaps.length > 0) label = `SWAPS (${pendingSwaps.length})`;
                 else if (t === 'escalations' && openEscals.length > 0) label = `🚨 ESC (${openEscals.length})`;
                 else if (t === 'onboarding') label = pendingCount > 0 ? `AGENTS (${pendingCount})` : 'AGENTS';
+                else if (t === 'kpi') label = '📊 KPI';
                 return (
                   <button key={t} className={`btn-tab${tab === t ? ' on' : ''}`} onClick={() => setTab(t)}>
                     {label}
@@ -1755,6 +1899,17 @@ function AppInner() {
                 payStart={payStart} setPayStart={setPayStart} payEnd={payEnd} setPayEnd={setPayEnd}
                 payRange={payRange} exportPayCSV={exportPayCSV} setPayModal={setPayModal}
                 agents={agents} logs={logs} />
+            )}
+
+            {/* KPI DASHBOARDS — META / Kanal / Helpwave / Refund + Productivity */}
+            {tab === 'kpi' && (
+              <KpiPanel
+                data={kpiData} loading={kpiLoading} error={kpiError} loaded={kpiLoaded} fetchedAt={kpiFetchedAt}
+                onRefresh={fetchDashboards}
+                productivity={productivityRows}
+                agents={agents}
+                showRefund showProductivity showAllPlatforms
+              />
             )}
 
             {/* SWAPS */}
@@ -2128,7 +2283,7 @@ function AppInner() {
                         </div>
                         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           <button className="btn bg" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
-                            onClick={() => { setEditAgent(a); setEditForm({ position: a.position || POSITIONS[0], platform: a.platform, shift: a.shift || 'Morning', salary: String(a.salary || 0) }); }}>
+                            onClick={() => { setEditAgent(a); setEditForm({ position: a.position || POSITIONS[0], platform: a.platform, shift: a.shift || 'Morning', salary: String(a.salary || 0), kpiName: a.kpiName || '' }); }}>
                             ✎ EDIT
                           </button>
                           <button className="btn bg" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
@@ -2423,7 +2578,9 @@ function AppInner() {
                 </select>
               </>}
             <label className="lbl">MONTHLY SALARY (USD)</label>
-            <input className="inp" style={{ marginBottom: 14 }} type="number" inputMode="numeric" value={editForm.salary} onChange={e => setEditForm({ ...editForm, salary: e.target.value })} />
+            <input className="inp gap" type="number" inputMode="numeric" value={editForm.salary} onChange={e => setEditForm({ ...editForm, salary: e.target.value })} />
+            <label className="lbl">KPI DASHBOARD NAME (HOW THIS AGENT APPEARS IN THE {String(editForm.platform || '').toUpperCase()} SHEET)</label>
+            <input className="inp" style={{ marginBottom: 14 }} type="text" placeholder="Leave blank to use display name" value={editForm.kpiName || ''} onChange={e => setEditForm({ ...editForm, kpiName: e.target.value })} />
             <div className="alert awn gap" style={{ fontSize: 11 }}>
               ⓘ Changes apply immediately. The agent's password is not affected. Existing time logs and payroll history remain attached to this account.
             </div>
@@ -2461,6 +2618,37 @@ function AppInner() {
               <Chip color="var(--blue)">{user.name}</Chip>
             </div>
             <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>YOUR ATTENDANCE & EARNINGS PREVIEW</div>
+
+            {/* Today — pulls from KPI dashboard if available */}
+            {(() => {
+              const todayHoursMs = (recs[user.name]?.clockIn && !recs[user.name]?.clockedOut)
+                ? Math.max(0, (Date.now() - recs[user.name].clockIn) - (recs[user.name].pauseUsedMs || 0) - (recs[user.name].breakUsedMs || 0))
+                : 0;
+              const platformKey = String(user.platform || '').toLowerCase();
+              const ticketsToday = kpiData ? kpiAgentMatch(user, platformKey) : null;
+              const hours = todayHoursMs / 3_600_000;
+              const ratio = hours > 0 && ticketsToday !== null ? ticketsToday / hours : null;
+              return (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 8 }}>TODAY</div>
+                  <div className="g3">
+                    <MiniStat label="HOURS NOW" value={fmt(todayHoursMs)} color="var(--teal)" />
+                    <MiniStat label="TICKETS" value={ticketsToday !== null ? ticketsToday : (kpiLoading ? '…' : '—')} color="var(--blue)" />
+                    <MiniStat label="PER HOUR" value={ratio !== null ? ratio.toFixed(1) : '—'} color={ratio !== null && ratio >= 5 ? 'var(--teal)' : 'var(--amber)'} />
+                  </div>
+                  {ticketsToday === null && kpiLoaded && !kpiError && (
+                    <div style={{ fontSize: 10, color: 'var(--amber)', fontFamily: 'var(--mono)', marginTop: 6, textAlign: 'center' }}>
+                      ⓘ Your name doesn't match the {String(user.platform || '').toUpperCase()} dashboard. Ask your manager to set your KPI name.
+                    </div>
+                  )}
+                  {kpiError && (
+                    <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 6, textAlign: 'center' }}>
+                      KPI data unavailable.
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* This week */}
             <div style={{ marginBottom: 14 }}>
@@ -2653,6 +2841,354 @@ function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPaySt
             </div>
           ))}
       </Glass>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KPI PANEL — renders the four dashboard slices (META / Kanal / Helpwave / Refund)
+// plus an optional productivity table that joins attendance hours with KPI tickets.
+//
+// Input shape (per platform key in `data`):
+//   { _error: '...' }                 → render the error
+//   { range_name: 2D array of cells, range_name2: { _error: '...' } }
+// 
+// Stays defensive: every block is independently null-checkable so a missing
+// named range only blanks that one card, never the whole panel.
+// ─────────────────────────────────────────────────────────────────────────────
+function KpiPanel({ data, loading, error, loaded, fetchedAt, onRefresh, productivity, agents, showRefund, showProductivity, showAllPlatforms }) {
+
+  // Helpers — every read is null-safe
+  const getRange = (platform, key) => {
+    if (!data || !data[platform]) return null;
+    const v = data[platform][key];
+    if (!v) return null;
+    if (v._error) return { _error: v._error };
+    if (!Array.isArray(v)) return null;
+    return v;
+  };
+
+  const getCell = (platform, key) => {
+    const v = getRange(platform, key);
+    if (!v || v._error) return v;
+    if (Array.isArray(v) && v.length && Array.isArray(v[0])) return v[0][0];
+    return null;
+  };
+
+  const fmtNum = n => {
+    if (n === null || n === undefined || n === '') return '—';
+    const x = typeof n === 'number' ? n : Number(n);
+    if (!isFinite(x)) return String(n);
+    return x.toLocaleString('en-US');
+  };
+
+  const fmtEur = n => {
+    if (n === null || n === undefined || n === '') return '—';
+    const x = typeof n === 'number' ? n : Number(String(n).replace(/[^0-9.\-]/g, ''));
+    if (!isFinite(x)) return String(n);
+    return `€${x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  // ── Loading / error / empty states ──
+  if (loading && !loaded) {
+    return <Glass><div style={{ textAlign: 'center', color: 'var(--sub)', padding: 32 }}>Loading dashboards…</div></Glass>;
+  }
+  if (error && !loaded) {
+    return (
+      <Glass>
+        <div className="alert aer" style={{ marginBottom: 12 }}>
+          ⚠ KPI fetch failed: {error}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--sub)', lineHeight: 1.6, marginBottom: 14 }}>
+          Most common causes: (1) Apps Script not redeployed after pasting the new code, (2) sheet IDs in the script don't match, (3) the deploying account lacks read access to one of the four sheets, (4) named ranges weren't created in a sheet.
+        </div>
+        <button className="btn bt" style={{ fontSize: 11 }} onClick={onRefresh}>↺ RETRY</button>
+      </Glass>
+    );
+  }
+  if (!data) {
+    return <Glass><div style={{ textAlign: 'center', color: 'var(--sub)', padding: 32 }}>No data yet — <button className="btn bt" style={{ fontSize: 11, marginLeft: 8 }} onClick={onRefresh}>LOAD</button></div></Glass>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+      {/* Refresh strip */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1 }}>
+          {fetchedAt ? `Last updated: ${new Date(fetchedAt).toLocaleString('en-PH', { timeZone: PH_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', month: 'short', day: 'numeric' })}` : ''}
+        </div>
+        <button className="btn bg" style={{ fontSize: 11 }} onClick={onRefresh} disabled={loading}>{loading ? '…' : '↺ REFRESH'}</button>
+      </div>
+
+      {/* ── PRODUCTIVITY ──────────────────────────────────────────────── */}
+      {showProductivity && (
+        <Glass>
+          <SectionHead>
+            ⚡ Productivity Today
+            <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>tickets ÷ hours clocked</span>
+          </SectionHead>
+          {productivity.length === 0
+            ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontSize: 12 }}>No active agents on shift.</div>
+            : (() => {
+              const matched = productivity.filter(p => p.matched && p.hoursWorked > 0.05);
+              const unmatched = productivity.filter(p => !p.matched);
+              const sorted = [...matched].sort((a, b) => (b.ratio || 0) - (a.ratio || 0));
+              const maxRatio = Math.max(...sorted.map(p => p.ratio || 0), 1);
+              return (
+                <>
+                  {sorted.length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '12px 0', fontSize: 12 }}>No matched agents have clocked enough time today to compute productivity.</div>
+                    : sorted.map(p => {
+                      const pct = (p.ratio / maxRatio) * 100;
+                      const barColor = p.ratio >= 5 ? 'var(--teal)' : p.ratio >= 2 ? 'var(--blue)' : 'var(--amber)';
+                      return (
+                        <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 4px', borderBottom: '1px solid rgba(255,255,255,.04)' }}>
+                          <div className="av" style={{ background: dg(p.platform), color: dc(p.platform), width: 32, height: 32, fontSize: 12 }}>{p.name[0]}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
+                              <span>{p.name} <span style={{ fontSize: 9, color: 'var(--sub)', fontFamily: 'var(--mono)', marginLeft: 4 }}>{p.platform}</span></span>
+                              <span style={{ fontFamily: 'var(--mono)', color: barColor }}>{p.ratio.toFixed(1)}/h</span>
+                            </div>
+                            <div style={{ height: 4, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden' }}>
+                              <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 2, transition: 'width .4s ease' }} />
+                            </div>
+                            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>
+                              {p.ticketsToday} tickets · {p.hoursWorked.toFixed(1)}h clocked
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  }
+                  {unmatched.length > 0 && (
+                    <div className="alert awn" style={{ marginTop: 14, fontSize: 11, lineHeight: 1.5 }}>
+                      ⓘ Couldn't match these agents to their platform's KPI dashboard: <strong>{unmatched.map(p => `${p.name} (${p.platform})`).join(', ')}</strong>. Open AGENTS tab → EDIT → set the KPI Dashboard Name to the name used in the sheet.
+                    </div>
+                  )}
+                </>
+              );
+            })()
+          }
+        </Glass>
+      )}
+
+      {/* ── PER-PLATFORM DASHBOARDS ─────────────────────────────────────── */}
+      {showAllPlatforms && (
+        <>
+          <PlatformCard
+            label="META" hue={210}
+            todayValue={getCell('meta', 'today_total')}
+            todayLabel="TICKETS TODAY"
+            agentTracking={getRange('meta', 'agent_tracking')}
+            caseMatrices={[
+              { title: 'By Agent', data: getRange('meta', 'case_matrix_by_agent') },
+              { title: 'By Country', data: getRange('meta', 'case_matrix_by_country') },
+            ]}
+            fmtNum={fmtNum} agents={agents}
+          />
+          <PlatformCard
+            label="KANAL" hue={42}
+            todayValue={getCell('kanal', 'today_total')}
+            todayLabel="CONVERSATIONS TODAY"
+            agentTracking={getRange('kanal', 'agent_tracking')}
+            extraSummary={getRange('kanal', 'refunds_summary')}
+            extraSummaryTitle="Refunds Summary"
+            caseMatrices={[
+              { title: 'By Agent', data: getRange('kanal', 'case_matrix_by_agent') },
+              { title: 'By Country', data: getRange('kanal', 'case_matrix_by_country') },
+            ]}
+            fmtNum={fmtNum} agents={agents}
+          />
+          <PlatformCard
+            label="HELPWAVE" hue={24}
+            todayValue={getCell('helpwave', 'daily_total')}
+            todayLabel="TICKETS CLOSED TODAY"
+            secondaryValue={getCell('helpwave', 'weekly_total')}
+            secondaryLabel="THIS WEEK"
+            agentTracking={getRange('helpwave', 'agent_tracking')}
+            extraSummary={getRange('helpwave', 'refunds_totals')}
+            extraSummaryTitle="Refund Totals"
+            caseMatrices={[
+              { title: 'By Agent', data: getRange('helpwave', 'case_matrix_by_agent') },
+              { title: 'By Country', data: getRange('helpwave', 'case_matrix_by_country') },
+            ]}
+            fmtNum={fmtNum} agents={agents}
+          />
+        </>
+      )}
+
+      {/* ── REFUND DASHBOARD ────────────────────────────────────────────── */}
+      {showRefund && (
+        <Glass glow="rgba(244,63,94,0.15)">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -.3 }}>💸 Refund Requests</div>
+              <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1.5, marginTop: 3 }}>
+                Period from sheet · {(() => {
+                  const m = getCell('refund', 'month_label');
+                  return m ? `Month: ${m}` : '';
+                })()}
+              </div>
+            </div>
+            <Chip color="var(--red)">{fmtEur(getCell('refund', 'overall_total'))}</Chip>
+          </div>
+
+          {/* Per-currency totals */}
+          {(() => {
+            const grid = getRange('refund', 'summary_by_currency');
+            if (!grid || grid._error) return grid?._error ? <div className="alert awn" style={{ marginBottom: 12 }}>refund_summary_by_currency: {grid._error}</div> : null;
+            return <RangeTable title="By Country & Currency" grid={grid} accent="var(--red)" />;
+          })()}
+
+          {/* Count by country */}
+          {(() => {
+            const grid = getRange('refund', 'summary_count');
+            if (!grid || grid._error) return null;
+            return <RangeTable title="Refund Count by Country" grid={grid} accent="var(--amber)" compact />;
+          })()}
+
+          {/* Count by country & case (the big table) */}
+          {(() => {
+            const grid = getRange('refund', 'count_by_country_case');
+            if (!grid || grid._error) return null;
+            return <RangeTable title="Refunds by Country × Case" grid={grid} accent="var(--blue)" compact />;
+          })()}
+
+          {/* Amount by country & case */}
+          {(() => {
+            const grid = getRange('refund', 'amount_by_country_case');
+            if (!grid || grid._error) return null;
+            return <RangeTable title="Refund Amount by Country × Case" grid={grid} accent="var(--purple)" compact />;
+          })()}
+        </Glass>
+      )}
+    </div>
+  );
+}
+
+// Platform-specific dashboard card. Renders today's headline number, agent
+// tracking grid as a list, and any provided case matrices.
+function PlatformCard({ label, hue, todayValue, todayLabel, secondaryValue, secondaryLabel, agentTracking, extraSummary, extraSummaryTitle, caseMatrices, fmtNum, agents }) {
+  const accent = `hsl(${hue},80%,55%)`;
+  const accentBg = `hsla(${hue},80%,55%,0.08)`;
+
+  // Build a map of registered agents (for matching against dashboard names)
+  const registered = new Set((agents || []).filter(a => a.status === 'active' && a.role === 'Agent')
+    .map(a => String(a.kpiName || a.name || '').trim().toUpperCase())
+    .filter(Boolean));
+
+  return (
+    <Glass glow={`hsla(${hue},80%,55%,0.18)`}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, letterSpacing: -.3 }}>📈 {label}</div>
+          <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1.5, marginTop: 3 }}>{label} KPI DASHBOARD</div>
+        </div>
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          {todayValue !== null && todayValue !== undefined && (
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 28, fontWeight: 700, color: accent, lineHeight: 1 }}>{fmtNum(todayValue)}</div>
+              <div style={{ fontSize: 9, color: 'var(--sub)', letterSpacing: 1.5, fontFamily: 'var(--mono)', marginTop: 4 }}>{todayLabel}</div>
+            </div>
+          )}
+          {secondaryValue !== null && secondaryValue !== undefined && (
+            <div style={{ textAlign: 'right', borderLeft: '1px solid rgba(255,255,255,.08)', paddingLeft: 14 }}>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 22, fontWeight: 700, color: 'var(--text)', lineHeight: 1 }}>{fmtNum(secondaryValue)}</div>
+              <div style={{ fontSize: 9, color: 'var(--sub)', letterSpacing: 1.5, fontFamily: 'var(--mono)', marginTop: 4 }}>{secondaryLabel}</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Agent tracking — show today's count + weekday breakdown */}
+      {agentTracking && !agentTracking._error && agentTracking.length >= 2 && (() => {
+        const header = agentTracking[0].map(h => String(h || '').trim());
+        const todayName = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'][new Date().getDay()];
+        const todayCol = header.findIndex(h => h.toUpperCase() === todayName);
+        const rows = agentTracking.slice(1).filter(r => String(r[0] || '').trim());
+        const sorted = [...rows].sort((a, b) => (Number(b[todayCol]) || 0) - (Number(a[todayCol]) || 0));
+        const maxToday = Math.max(...rows.map(r => Number(r[todayCol]) || 0), 1);
+        return (
+          <div style={{ marginBottom: 14, padding: 12, borderRadius: 12, background: accentBg, border: `1px solid hsla(${hue},80%,55%,0.15)` }}>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1.5, marginBottom: 10 }}>AGENT TRACKING — TODAY</div>
+            {sorted.map((row, i) => {
+              const name = String(row[0] || '').trim();
+              const today = Number(row[todayCol]) || 0;
+              const total = row.slice(1).reduce((s, v) => s + (Number(v) || 0), 0);
+              const pct = (today / maxToday) * 100;
+              const isRegistered = registered.has(name.toUpperCase());
+              return (
+                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
+                      <span style={{ fontWeight: 700, color: isRegistered ? 'var(--text)' : 'var(--sub)' }}>
+                        {name}
+                        {!isRegistered && <span style={{ fontSize: 9, color: 'var(--amber)', marginLeft: 6, fontFamily: 'var(--mono)' }}>· not in app</span>}
+                      </span>
+                      <span style={{ fontFamily: 'var(--mono)', color: accent }}>{today} <span style={{ color: 'var(--sub)', fontSize: 10 }}>/ {total} wk</span></span>
+                    </div>
+                    <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: accent, borderRadius: 2 }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
+
+      {/* Optional secondary summary table */}
+      {extraSummary && !extraSummary._error && Array.isArray(extraSummary) && extraSummary.length > 0 && (
+        <RangeTable title={extraSummaryTitle || 'Summary'} grid={extraSummary} accent={accent} compact />
+      )}
+
+      {/* Case matrices — collapsed by default */}
+      {(caseMatrices || []).filter(m => m.data && !m.data._error && Array.isArray(m.data) && m.data.length > 1).map((m, i) => (
+        <RangeTable key={i} title={m.title} grid={m.data} accent={accent} compact />
+      ))}
+
+      {/* Errors for missing ranges */}
+      {agentTracking?._error && <div className="alert awn" style={{ marginTop: 8, fontSize: 11 }}>agent_tracking: {agentTracking._error}</div>}
+      {extraSummary?._error && <div className="alert awn" style={{ marginTop: 8, fontSize: 11 }}>{extraSummaryTitle}: {extraSummary._error}</div>}
+    </Glass>
+  );
+}
+
+// Generic 2D-array → table renderer. Renders the first row as headers,
+// remainder as data. Compact mode reduces row padding.
+function RangeTable({ title, grid, accent, compact }) {
+  if (!grid || !Array.isArray(grid) || grid.length < 1) return null;
+  const header = grid[0];
+  const body = grid.slice(1);
+  const cellPad = compact ? '6px 10px' : '10px 13px';
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1.5, marginBottom: 8 }}>{(title || '').toUpperCase()}</div>
+      <div className="tbl-wrap">
+        <table className="tbl" style={{ minWidth: Math.min(720, header.length * 90) }}>
+          <thead>
+            <tr>{header.map((h, i) => (
+              <th key={i} style={{ padding: cellPad, color: i === 0 ? 'var(--text)' : accent, fontWeight: 700 }}>
+                {String(h || '')}
+              </th>
+            ))}</tr>
+          </thead>
+          <tbody>
+            {body.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => (
+                  <td key={j} style={{ padding: cellPad, fontWeight: j === 0 ? 700 : 400, color: j === 0 ? 'var(--text)' : 'var(--sub)' }}>
+                    {cell === '' || cell === null || cell === undefined ? '—' :
+                      (typeof cell === 'number' ? cell.toLocaleString('en-US') : String(cell))}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
