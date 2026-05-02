@@ -637,14 +637,17 @@ export default function App() {
     await fetch_(); setBusy(false);
   };
 
-  // ── SESSION CALCS ──
+// ── SESSION CALCS ──
   // Break IS included in the 8h shift (7h work + 1h break = 8h total).
   // Duty Pause is NOT counted — it extends the shift window.
   const rec       = user ? (recs[user.name] || {}) : {};
+  
+  // FIX: Determine the end point for calculations (use clockOut time if it exists, otherwise use 'now')
   const endTime   = rec.clockedOut && rec.clockOut ? rec.clockOut : now;
+
   const bMs       = (rec.breakUsedMs || 0) + (rec.onBreak ? (now - rec.breakStart) : 0);
   const pauseMs   = (rec.pauseUsedMs || 0) + (rec.onPause ? (now - rec.pauseStart) : 0);
-  const rawMs     = rec.clockIn ? (endTime - rec.clockIn) : 0;
+  const rawMs     = rec.clockIn ? (endTime - rec.clockIn) : 0; // Use endTime instead of now
   const shMs      = Math.max(0, rawMs - pauseMs);   // elapsed excl. paused time
   const net       = Math.max(0, shMs - bMs);         // actual work time (display)
   const ot        = Math.max(0, shMs - SHIFT_GOAL);
