@@ -427,6 +427,10 @@ function AppInner() {
   const [escalModal, setEscalModal]= useState(false);
   const [annModal,   setAnnModal]  = useState(false);
   const [payModal,   setPayModal]  = useState(null); // agent object for payslip
+  const [pwModal,    setPwModal]   = useState(false); // self-serve password change
+  const [editAgent,  setEditAgent] = useState(null);  // agent obj being edited by manager
+  const [resetAgent, setResetAgent]= useState(null);  // agent whose password the manager is resetting
+  const [statsModal, setStatsModal]= useState(false); // agent's own attendance + earnings preview
 
   // ── forms ──
   const [reg,   setReg]  = useState({ name: '', pin: '', platform: 'META', shift: 'Morning', position: POSITIONS[0] });
@@ -435,6 +439,10 @@ function AppInner() {
   const [err,   setErr]  = useState('');
   const [ok,    setOk]   = useState('');
   const [sal,   setSal]  = useState('');
+  const [pwForm,    setPwForm]    = useState({ current: '', next: '', confirm: '' });
+  const [pwErr,     setPwErr]     = useState('');
+  const [editForm,  setEditForm]  = useState({ position: '', platform: '', shift: '', salary: '' });
+  const [resetForm, setResetForm] = useState('');
 
   // ── log filter (defaults to TODAY) ──
   const [logDate, setLogDate] = useState(tsKey());
@@ -578,7 +586,10 @@ function AppInner() {
     try {
       const d = await fetch(HOOK).then(r => r.json());
 
-      const uRows = d.filter(i => i.action === 'USER_REGISTER' || i.action === 'USER_APPROVE');
+      const USER_ACTIONS = ['USER_REGISTER','USER_APPROVE','USER_PWCHANGE','USER_UPDATE','USER_DEACTIVATE','USER_REACTIVATE'];
+      const uRows = d.filter(i => USER_ACTIONS.includes(i.action))
+        .map(r => ({ ...r, timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() }))
+        .sort((a, b) => a.timestamp - b.timestamp); // ASC — latest action wins
       const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET'].includes(i.action))
         .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
         .sort((a, b) => b.timestamp - a.timestamp);
@@ -613,8 +624,27 @@ function AppInner() {
       const map = {};
       uRows.forEach(u => {
         try {
-          const x = JSON.parse(u.device);
-          map[u.agent.toLowerCase()] = { ...x, name: u.agent, status: u.action === 'USER_APPROVE' ? 'active' : 'pending' };
+          const x = u.device ? JSON.parse(u.device) : {};
+          const key = u.agent.toLowerCase();
+          const cur = map[key] || {};
+          if (u.action === 'USER_REGISTER') {
+            // Initial registration — only seed if no record yet, never overwrite an active account
+            map[key] = cur.status ? cur : { ...x, name: u.agent, status: 'pending' };
+          } else if (u.action === 'USER_APPROVE') {
+            // Approve flips to active. Manager-side approval may carry an updated salary.
+            map[key] = { ...cur, ...x, name: u.agent, status: 'active' };
+          } else if (u.action === 'USER_PWCHANGE') {
+            // Only the pin changes; everything else stays.
+            map[key] = { ...cur, pin: x.pin };
+          } else if (u.action === 'USER_UPDATE') {
+            // Manager edited profile — merge whitelisted fields. NEVER let this overwrite pin.
+            const { pin: _ignored, status: _s, name: _n, ...safe } = x;
+            map[key] = { ...cur, ...safe };
+          } else if (u.action === 'USER_DEACTIVATE') {
+            map[key] = { ...cur, status: 'inactive' };
+          } else if (u.action === 'USER_REACTIVATE') {
+            map[key] = { ...cur, status: 'active' };
+          }
         } catch { }
       });
 
@@ -676,6 +706,7 @@ function AppInner() {
     const found = agents.find(a => a.name.toLowerCase() === logF.name.toLowerCase().trim() && a.pin === logF.pin);
     if (!found) return setErr('Credentials not found.');
     if (found.status === 'pending') return setErr('Account awaiting approval.');
+    if (found.status === 'inactive') return setErr('Account has been deactivated. Contact your manager.');
 
     if (found.role === ROLE_AGENT) {
       const rebuilt = rebuildSession(found.name, logs);
@@ -856,6 +887,99 @@ function AppInner() {
     await fetch_(); setBusy(false);
   };
 
+  // ── ACCOUNT MANAGEMENT ──
+
+  // Self-serve password change (agent or manager)
+  const doChangePassword = async () => {
+    setPwErr('');
+    if (!user) return;
+    if (pwForm.current !== user.pin) return setPwErr('Current password is incorrect.');
+    if (!pwForm.next || pwForm.next.length < 4) return setPwErr('New password must be at least 4 characters.');
+    if (pwForm.next === pwForm.current) return setPwErr('New password must differ from the current one.');
+    if (pwForm.next !== pwForm.confirm) return setPwErr('Confirmation does not match.');
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'USER_PWCHANGE', agent: user.name, timestamp: Date.now(),
+        device: JSON.stringify({ pin: pwForm.next, by: 'self' }),
+      });
+      // Update local user immediately so this session keeps working without re-login
+      const updated = { ...user, pin: pwForm.next };
+      setUser(updated);
+      setPwForm({ current: '', next: '', confirm: '' });
+      setPwModal(false);
+      showToast('Password updated');
+      fetch_().catch(console.error);
+    } catch (e) {
+      setPwErr('Network error — try again.');
+    }
+    setBusy(false);
+  };
+
+  // Manager: force-reset an agent's password
+  const doResetPassword = async () => {
+    if (!resetAgent || !resetForm || resetForm.length < 4) {
+      return showToast('Password must be at least 4 characters', 'err');
+    }
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'USER_PWCHANGE', agent: resetAgent.name, timestamp: Date.now(),
+        device: JSON.stringify({ pin: resetForm, by: user?.name || 'manager' }),
+      });
+      showToast(`Password reset for ${resetAgent.name}`);
+      setResetAgent(null);
+      setResetForm('');
+      await fetch_();
+    } catch (e) { showToast('Reset failed', 'err'); }
+    setBusy(false);
+  };
+
+  // Manager: edit an agent's profile (position, platform, shift, salary)
+  const doUpdateAgent = async () => {
+    if (!editAgent) return;
+    const lock = lockedShift(editForm.platform);
+    const finalShift = lock || editForm.shift;
+    const salary = Number(editForm.salary);
+    if (!isFinite(salary) || salary < 0) return showToast('Invalid salary', 'err');
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'USER_UPDATE', agent: editAgent.name, timestamp: Date.now(),
+        device: JSON.stringify({
+          position: editForm.position,
+          platform: editForm.platform,
+          shift: finalShift,
+          salary,
+          updatedBy: user?.name,
+        }),
+      });
+      showToast(`${editAgent.name} updated`);
+      setEditAgent(null);
+      await fetch_();
+    } catch (e) { showToast('Update failed', 'err'); }
+    setBusy(false);
+  };
+
+  // Manager: deactivate or reactivate an agent
+  const doToggleAgentStatus = async (agent, deactivate) => {
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: deactivate ? 'USER_DEACTIVATE' : 'USER_REACTIVATE',
+        agent: agent.name, timestamp: Date.now(),
+        device: JSON.stringify({ by: user?.name }),
+      });
+      showToast(`${agent.name} ${deactivate ? 'deactivated' : 'reactivated'}`);
+      await fetch_();
+    } catch (e) { showToast('Action failed', 'err'); }
+    setBusy(false);
+  };
+
   // ── SESSION CALCS ──
   // Break IS included in the 8h shift (7h work + 1h break = 8h total).
   // Duty Pause is NOT counted — it extends the shift window.
@@ -985,6 +1109,26 @@ function AppInner() {
     const activeAgents = agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT);
     return calcPayroll(activeAgents, payRange.from, payRange.to);
   }, [agents, payRange, calcPayroll]);
+
+  // ── AGENT'S OWN STATS — current period earnings preview + last 14 days ──
+  const myStats = useMemo(() => {
+    if (!user || user.role !== ROLE_AGENT) return null;
+    const now_ = new Date(); now_.setHours(0,0,0,0);
+    const dow = now_.getDay();
+    const mon = new Date(now_); mon.setDate(now_.getDate() - (dow === 0 ? 6 : dow - 1));
+    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+    const weekFrom = new Date(mon.toLocaleDateString('en-CA', { timeZone: PH_TZ }) + 'T00:00:00+08:00').getTime();
+    const weekTo   = new Date(sun.toLocaleDateString('en-CA', { timeZone: PH_TZ }) + 'T23:59:59+08:00').getTime();
+    const monthFrom = new Date(`${now_.getFullYear()}-${String(now_.getMonth()+1).padStart(2,'0')}-01T00:00:00+08:00`).getTime();
+    const monthEndDay = new Date(now_.getFullYear(), now_.getMonth()+1, 0).getDate();
+    const monthTo = new Date(`${now_.getFullYear()}-${String(now_.getMonth()+1).padStart(2,'0')}-${monthEndDay}T23:59:59+08:00`).getTime();
+    const fortnightFrom = todayMs() - 13 * 86_400_000;
+    const fortnightTo   = todayMs() + 86_400_000 - 1;
+    const week  = calcPayroll([user], weekFrom, weekTo)[0];
+    const month = calcPayroll([user], monthFrom, monthTo)[0];
+    const last14 = calcPayroll([user], fortnightFrom, fortnightTo)[0];
+    return { week, month, last14 };
+  }, [user, calcPayroll]);
 
   // ── SWAP ELIGIBILITY — same platform AND same shift ──
   const swapEligible = useMemo(() =>
@@ -1345,6 +1489,8 @@ function AppInner() {
                     <button className="btn bb" style={{ fontSize: 11 }} onClick={() => setSwapModal(true)}>⇄ SWAP SHIFT</button>
                     <button className="btn br" style={{ fontSize: 11 }} onClick={() => setEscalModal(true)}>🚨 ESCALATE</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={() => setMemoModal(true)}>📝 MEMO</button>
+                    <button className="btn bt" style={{ fontSize: 11 }} onClick={() => setStatsModal(true)}>📊 MY STATS</button>
+                    <button className="btn bg" style={{ fontSize: 11 }} onClick={() => { setPwErr(''); setPwForm({current:'',next:'',confirm:''}); setPwModal(true); }}>🔒 PASSWORD</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={fetch_}>↺ REFRESH</button>
                   </div>
 
@@ -1471,7 +1617,10 @@ function AppInner() {
                   </div>
                 </div>
               </div>
-              <button className="btn bg" style={{ color: 'var(--red)' }} onClick={logout}>LOGOUT</button>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn bg" style={{ fontSize: 11 }} onClick={() => { setPwErr(''); setPwForm({current:'',next:'',confirm:''}); setPwModal(true); }}>🔒 PASSWORD</button>
+                <button className="btn bg" style={{ color: 'var(--red)' }} onClick={logout}>LOGOUT</button>
+              </div>
             </div>
 
             {/* Payroll section directly */}
@@ -1509,18 +1658,24 @@ function AppInner() {
                   );
                 })()}
                 <button className="btn bp" style={{ fontSize: 11 }} onClick={() => setAnnModal(true)}>📢 ANNOUNCE</button>
+                <button className="btn bg" style={{ fontSize: 11 }} onClick={() => { setPwErr(''); setPwForm({current:'',next:'',confirm:''}); setPwModal(true); }}>🔒 PASSWORD</button>
                 <button className="btn bg" style={{ color: 'var(--red)', fontSize: 11 }} onClick={logout}>LOGOUT</button>
               </div>
             </div>
 
             <div className="tabs">
-              {['attendance','payroll','swaps','escalations','schedule','team','logs','onboarding'].map(t => (
-                <button key={t} className={`btn-tab${tab === t ? ' on' : ''}`} onClick={() => setTab(t)}>
-                  {t === 'swaps' && pendingSwaps.length > 0 ? `SWAPS (${pendingSwaps.length})` :
-                    t === 'escalations' && openEscals.length > 0 ? `🚨 ESC (${openEscals.length})` :
-                      t.toUpperCase()}
-                </button>
-              ))}
+              {['attendance','payroll','swaps','escalations','schedule','team','logs','onboarding'].map(t => {
+                const pendingCount = agents.filter(a => a.status === 'pending').length;
+                let label = t.toUpperCase();
+                if (t === 'swaps' && pendingSwaps.length > 0) label = `SWAPS (${pendingSwaps.length})`;
+                else if (t === 'escalations' && openEscals.length > 0) label = `🚨 ESC (${openEscals.length})`;
+                else if (t === 'onboarding') label = pendingCount > 0 ? `AGENTS (${pendingCount})` : 'AGENTS';
+                return (
+                  <button key={t} className={`btn-tab${tab === t ? ' on' : ''}`} onClick={() => setTab(t)}>
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
             {/* ATTENDANCE */}
@@ -1921,28 +2076,101 @@ function AppInner() {
 
             {/* ONBOARDING */}
             {tab === 'onboarding' && (
-              <Glass style={{ maxWidth: 540 }}>
-                <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 18 }}>Activation Queue</div>
-                <label className="lbl">SET MONTHLY SALARY (USD)</label>
-                <input className="inp gap" placeholder="e.g. 260" type="number" inputMode="numeric" onChange={e => setSal(e.target.value)} />
-                {agents.filter(a => a.status === 'pending').length === 0
-                  ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '20px 0', fontFamily: 'var(--mono)', fontSize: 12 }}>No pending registrations.</div>
-                  : agents.filter(a => a.status === 'pending').map(a => (
-                    <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '13px 0', borderBottom: '1px solid rgba(255,255,255,.05)', gap: 10, flexWrap: 'wrap' }}>
-                      <div>
-                        <div style={{ fontWeight: 700 }}>{a.name}</div>
-                        <div style={{ fontSize: 10, color: dc(a.platform), fontFamily: 'var(--mono)', letterSpacing: 1, marginTop: 3 }}>
-                          {a.platform} · {a.position || 'Agent'} · {resolveShift(a.shift || 'Morning').label} ({resolveShift(a.shift || 'Morning').start}–{resolveShift(a.shift || 'Morning').end})
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+                {/* Pending Activation Queue */}
+                <Glass>
+                  <SectionHead>
+                    Activation Queue
+                    <Chip color="var(--amber)">{agents.filter(a => a.status === 'pending').length} PENDING</Chip>
+                  </SectionHead>
+                  <label className="lbl">DEFAULT MONTHLY SALARY FOR APPROVAL (USD)</label>
+                  <input className="inp gap" placeholder="e.g. 260" type="number" inputMode="numeric" value={sal} onChange={e => setSal(e.target.value)} />
+                  {agents.filter(a => a.status === 'pending').length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontFamily: 'var(--mono)', fontSize: 12 }}>No pending registrations.</div>
+                    : agents.filter(a => a.status === 'pending').map(a => (
+                      <div key={a.name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '13px 0', borderBottom: '1px solid rgba(255,255,255,.05)', gap: 10, flexWrap: 'wrap' }}>
+                        <div>
+                          <div style={{ fontWeight: 700 }}>{a.name}</div>
+                          <div style={{ fontSize: 10, color: dc(a.platform), fontFamily: 'var(--mono)', letterSpacing: 1, marginTop: 3 }}>
+                            {a.platform} · {a.position || 'Agent'} · {resolveShift(a.shift || 'Morning').label} ({resolveShift(a.shift || 'Morning').start}–{resolveShift(a.shift || 'Morning').end})
+                          </div>
+                        </div>
+                        <button className="btn bt" style={{ fontSize: 11 }} onClick={async () => {
+                          if (!sal) return showToast('Assign salary first', 'err');
+                          await post({ date: phNowDate(), time: phNowTime(), action: 'USER_APPROVE', agent: a.name, device: JSON.stringify({ ...a, salary: Number(sal) }), timestamp: Date.now() });
+                          fetch_();
+                        }}>ACTIVATE</button>
+                      </div>
+                    ))}
+                </Glass>
+
+                {/* Active Roster — full management */}
+                <Glass>
+                  <SectionHead>
+                    Active Roster
+                    <Chip color="var(--teal)">{agents.filter(a => a.status === 'active').length} ACTIVE</Chip>
+                  </SectionHead>
+                  {agents.filter(a => a.status === 'active').length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontSize: 12 }}>No active accounts.</div>
+                    : agents.filter(a => a.status === 'active').sort((a,b) => a.name.localeCompare(b.name)).map(a => (
+                      <div key={a.name} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 6px', borderBottom: '1px solid rgba(255,255,255,.05)', flexWrap: 'wrap' }}>
+                        <div className="av" style={{ background: dg(a.platform), color: dc(a.platform) }}>{a.name[0]}</div>
+                        <div style={{ flex: 1, minWidth: 180 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            {a.name}
+                            {a.role === ROLE_MANAGER && <Chip color="var(--purple)" small>MGR</Chip>}
+                            {a.role === ROLE_FINANCE && <Chip color="var(--blue)" small>FIN</Chip>}
+                          </div>
+                          <div style={{ fontSize: 10, color: dc(a.platform), fontFamily: 'var(--mono)', marginTop: 2 }}>
+                            {a.platform} · {a.position || 'Agent'} · {resolveShift(a.shift || 'Morning').label} · {currency(a.salary || 0)}/mo
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button className="btn bg" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
+                            onClick={() => { setEditAgent(a); setEditForm({ position: a.position || POSITIONS[0], platform: a.platform, shift: a.shift || 'Morning', salary: String(a.salary || 0) }); }}>
+                            ✎ EDIT
+                          </button>
+                          <button className="btn bg" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
+                            onClick={() => { setResetAgent(a); setResetForm(''); }}>
+                            🔑 RESET PW
+                          </button>
+                          {a.name !== user?.name && (
+                            <button className="btn br" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
+                              onClick={() => { if (window.confirm(`Deactivate ${a.name}? They will be hidden from attendance, payroll, and swap eligibility, but their history is preserved.`)) doToggleAgentStatus(a, true); }}>
+                              ✕ DEACTIVATE
+                            </button>
+                          )}
                         </div>
                       </div>
-                      <button className="btn bt" style={{ fontSize: 11 }} onClick={async () => {
-                        if (!sal) return alert('Assign salary first.');
-                        await post({ date: phNowDate(), time: phNowTime(), action: 'USER_APPROVE', agent: a.name, device: JSON.stringify({ ...a, salary: Number(sal) }), timestamp: Date.now() });
-                        fetch_();
-                      }}>ACTIVATE</button>
-                    </div>
-                  ))}
-              </Glass>
+                    ))}
+                </Glass>
+
+                {/* Inactive Roster — reactivation */}
+                {agents.filter(a => a.status === 'inactive').length > 0 && (
+                  <Glass>
+                    <SectionHead>
+                      Inactive
+                      <Chip color="var(--sub)">{agents.filter(a => a.status === 'inactive').length}</Chip>
+                    </SectionHead>
+                    {agents.filter(a => a.status === 'inactive').sort((a,b) => a.name.localeCompare(b.name)).map(a => (
+                      <div key={a.name} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 6px', borderBottom: '1px solid rgba(255,255,255,.05)', flexWrap: 'wrap', opacity: 0.7 }}>
+                        <div className="av" style={{ background: 'rgba(100,116,139,.15)', color: 'var(--sub)' }}>{a.name[0]}</div>
+                        <div style={{ flex: 1, minWidth: 180 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--sub)' }}>{a.name}</div>
+                          <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 2 }}>
+                            {a.platform} · {a.position || 'Agent'}
+                          </div>
+                        </div>
+                        <button className="btn bt" style={{ fontSize: 10, minHeight: 32, padding: '5px 10px' }}
+                          onClick={() => doToggleAgentStatus(a, false)}>
+                          ↺ REACTIVATE
+                        </button>
+                      </div>
+                    ))}
+                  </Glass>
+                )}
+              </div>
             )}
           </div>
         )}
@@ -2143,6 +2371,153 @@ function AppInner() {
               })
             }
             <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setNotifTab(false)}>CLOSE</button>
+          </div>
+        </div>
+      )}
+
+      {/* Change Password (self-serve) */}
+      {pwModal && (
+        <div className="overlay" onClick={() => setPwModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Change Password</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>UPDATE YOUR LOGIN CREDENTIAL</div>
+            <label className="lbl">CURRENT PASSWORD</label>
+            <input className="inp gap" type="password" autoComplete="current-password" value={pwForm.current} onChange={e => setPwForm({ ...pwForm, current: e.target.value })} />
+            <label className="lbl">NEW PASSWORD</label>
+            <input className="inp gap" type="password" autoComplete="new-password" placeholder="Min 4 characters" value={pwForm.next} onChange={e => setPwForm({ ...pwForm, next: e.target.value })} />
+            <label className="lbl">CONFIRM NEW PASSWORD</label>
+            <input className="inp" style={{ marginBottom: 14 }} type="password" autoComplete="new-password" value={pwForm.confirm} onChange={e => setPwForm({ ...pwForm, confirm: e.target.value })} />
+            {pwErr && <div className="alert aer gap">⚠ {pwErr}</div>}
+            <button className="btn bt bw" disabled={busy} onClick={doChangePassword}>{busy ? 'UPDATING…' : 'UPDATE PASSWORD'}</button>
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setPwModal(false)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Manager: Edit Agent Profile */}
+      {editAgent && (
+        <div className="overlay" onClick={() => setEditAgent(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Edit {editAgent.name}</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>PROFILE & ASSIGNMENT</div>
+            <label className="lbl">DEPARTMENT</label>
+            <select className="inp gap" value={editForm.platform} onChange={e => {
+              const dept = e.target.value;
+              const lock = lockedShift(dept);
+              setEditForm({ ...editForm, platform: dept, shift: lock || editForm.shift });
+            }}>
+              {Object.keys(DEPT_HUE).map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <label className="lbl">POSITION</label>
+            <select className="inp gap" value={editForm.position} onChange={e => setEditForm({ ...editForm, position: e.target.value })}>
+              {POSITIONS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {lockedShift(editForm.platform)
+              ? <div className="alert aok gap">🕘 Shift locked to <strong>{lockedShift(editForm.platform)}</strong> for this department.</div>
+              : <>
+                <label className="lbl">SHIFT</label>
+                <select className="inp gap" value={editForm.shift} onChange={e => setEditForm({ ...editForm, shift: e.target.value })}>
+                  {shiftsForDept(editForm.platform).map(s => <option key={s.label} value={s.label}>{s.label} ({s.start}–{s.end}{s.overnight ? ' +1' : ''})</option>)}
+                </select>
+              </>}
+            <label className="lbl">MONTHLY SALARY (USD)</label>
+            <input className="inp" style={{ marginBottom: 14 }} type="number" inputMode="numeric" value={editForm.salary} onChange={e => setEditForm({ ...editForm, salary: e.target.value })} />
+            <div className="alert awn gap" style={{ fontSize: 11 }}>
+              ⓘ Changes apply immediately. The agent's password is not affected. Existing time logs and payroll history remain attached to this account.
+            </div>
+            <button className="btn bt bw" disabled={busy} onClick={doUpdateAgent}>{busy ? 'SAVING…' : 'SAVE CHANGES'}</button>
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setEditAgent(null)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Manager: Reset Agent Password */}
+      {resetAgent && (
+        <div className="overlay" onClick={() => setResetAgent(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Reset Password — {resetAgent.name}</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>OVERRIDES THE AGENT'S CURRENT PASSWORD</div>
+            <div className="alert awn gap" style={{ fontSize: 12, lineHeight: 1.5 }}>
+              ⚠ Share the new password with {resetAgent.name} <strong>through a secure channel</strong>, not in chat history. Ask them to change it themselves after first login.
+            </div>
+            <label className="lbl">NEW PASSWORD</label>
+            <input className="inp" style={{ marginBottom: 18 }} type="text" placeholder="Min 4 characters" value={resetForm} onChange={e => setResetForm(e.target.value)} />
+            <button className="btn br bw" disabled={busy} onClick={doResetPassword}>{busy ? 'RESETTING…' : '🔑 RESET PASSWORD'}</button>
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setResetAgent(null)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Agent: My Stats / Period Earnings Preview */}
+      {statsModal && myStats && user && (
+        <div className="overlay" onClick={() => setStatsModal(false)}>
+          <div className="modal" style={{ maxWidth: 620 }} onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ fontWeight: 800, fontSize: 19 }}>📊 My Stats</div>
+              <Chip color="var(--blue)">{user.name}</Chip>
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>YOUR ATTENDANCE & EARNINGS PREVIEW</div>
+
+            {/* This week */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 8 }}>THIS WEEK (MON–SUN)</div>
+              <div className="g3">
+                <MiniStat label="DAYS" value={myStats.week?.daysWorked || 0} color="var(--blue)" />
+                <MiniStat label="HOURS" value={fmtS(myStats.week?.totalShiftMs || 0)} color="var(--teal)" />
+                <MiniStat label="EARNED" value={currency(myStats.week?.grossPay || 0)} color="var(--teal)" />
+              </div>
+              {(myStats.week?.totalOtMs || 0) > 0 && (
+                <div style={{ fontSize: 11, color: 'var(--purple)', fontFamily: 'var(--mono)', marginTop: 6, textAlign: 'center' }}>
+                  +{fmtS(myStats.week.totalOtMs)} overtime · +{currency(myStats.week.otPay)} OT pay
+                </div>
+              )}
+            </div>
+
+            {/* This month */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 8 }}>THIS MONTH</div>
+              <div className="g3">
+                <MiniStat label="DAYS" value={myStats.month?.daysWorked || 0} color="var(--blue)" />
+                <MiniStat label="HOURS" value={fmtS(myStats.month?.totalShiftMs || 0)} color="var(--teal)" />
+                <MiniStat label="EARNED" value={currency(myStats.month?.grossPay || 0)} color="var(--teal)" />
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 6, textAlign: 'center' }}>
+                Daily rate: {currency((user.salary || 260) / WORKING_DAYS)} · Monthly base: {currency(user.salary || 260)}
+              </div>
+            </div>
+
+            <Sep />
+
+            {/* Last 14 days breakdown */}
+            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 10 }}>LAST 14 DAYS</div>
+            {(!myStats.last14?.days || myStats.last14.days.length === 0)
+              ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0', fontSize: 12 }}>No attendance recorded in this window.</div>
+              : <div className="tbl-wrap">
+                <table className="tbl" style={{ width: '100%' }}>
+                  <thead><tr><th>DATE</th><th>IN</th><th>OUT</th><th>WORK</th><th>OT</th></tr></thead>
+                  <tbody>
+                    {myStats.last14.days.slice().reverse().map((d, i) => (
+                      <tr key={i}>
+                        <td style={{ color: 'var(--sub)', whiteSpace: 'nowrap' }}>{phDateShort(new Date(d.date + 'T12:00:00+08:00').getTime())}</td>
+                        <td style={{ color: 'var(--teal)' }}>{d.ci ? phTimeShort(d.ci) : '—'}</td>
+                        <td style={{ color: 'var(--red)' }}>{d.co ? phTimeShort(d.co) : '—'}</td>
+                        <td style={{ fontWeight: 700 }}>{fmtS(d.workMs)}</td>
+                        <td style={{ color: d.otMs > 0 ? 'var(--purple)' : 'var(--sub)' }}>{d.otMs > 0 ? fmtS(d.otMs) : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            }
+
+            <div className="alert awn" style={{ marginTop: 14, fontSize: 11, lineHeight: 1.5 }}>
+              ⓘ This is a preview based on your clock-in records. Final payroll is calculated and approved by your manager. Discrepancies should be raised via the MEMO or ESCALATE button.
+            </div>
+            <button className="btn bg bw" style={{ marginTop: 14 }} onClick={() => setStatsModal(false)}>CLOSE</button>
           </div>
         </div>
       )}
