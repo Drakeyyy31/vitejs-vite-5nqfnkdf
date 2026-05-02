@@ -117,7 +117,7 @@ const deriveStatus = (logs, name, rec, role) => {
 const pad  = n => String(n).padStart(2, '0');
 const fmt  = ms => { if (!ms || ms < 0) return '00:00:00'; return `${pad(~~(ms / 3_600_000))}:${pad(~~(ms % 3_600_000 / 60_000))}:${pad(~~(ms % 60_000 / 1_000))}`; };
 const fmtS = ms => { if (!ms || ms < 0) return '0m'; const h = ~~(ms / 3_600_000), m = ~~(ms % 3_600_000 / 60_000); return h ? `${h}h ${m}m` : `${m}m`; };
-const currency = n => `₱${Number(n).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const currency = n => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENTS
@@ -877,8 +877,8 @@ function AppInner() {
     payrollData.forEach(a => rows.push([
       a.name, a.position || 'Agent', a.platform, a.daysWorked,
       fmtS(a.totalShiftMs), fmtS(a.totalOtMs),
-      `PHP ${a.dailyRate.toFixed(2)}`, `PHP ${a.regularPay.toFixed(2)}`,
-      `PHP ${a.otPay.toFixed(2)}`, `PHP ${a.grossPay.toFixed(2)}`,
+      `USD ${a.dailyRate.toFixed(2)}`, `USD ${a.regularPay.toFixed(2)}`,
+      `USD ${a.otPay.toFixed(2)}`, `USD ${a.grossPay.toFixed(2)}`,
     ]));
     const b = new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(b);
@@ -1515,7 +1515,7 @@ function AppInner() {
             {tab === 'onboarding' && (
               <Glass style={{ maxWidth: 540 }}>
                 <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 18 }}>Activation Queue</div>
-                <label className="lbl">SET MONTHLY SALARY (PHP)</label>
+                <label className="lbl">SET MONTHLY SALARY (USD)</label>
                 <input className="inp gap" placeholder="e.g. 260" type="number" inputMode="numeric" onChange={e => setSal(e.target.value)} />
                 {agents.filter(a => a.status === 'pending').length === 0
                   ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '20px 0', fontFamily: 'var(--mono)', fontSize: 12 }}>No pending registrations.</div>
@@ -1729,7 +1729,7 @@ function AppInner() {
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
                 <div>
                   <div style={{ fontWeight: 800, fontSize: 18 }}>AFTERSALES — WEAVNONO LLC</div>
-                  <div style={{ fontSize: 11, color: '#555', marginTop: 3 }}>Cellumove / Bloomommy Operations</div>
+                  <div style={{ fontSize: 11, color: '#555', marginTop: 3 }}>Cellumove / Bloomommy Operations · Salaries in USD</div>
                 </div>
                 <div style={{ textAlign: 'right', fontSize: 11, color: '#555' }}>
                   <div>Period: {phDateLong(payRange.from)} – {phDateLong(payRange.to)}</div>
