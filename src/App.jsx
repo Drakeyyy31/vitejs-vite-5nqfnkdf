@@ -966,7 +966,7 @@ function AppInner() {
     ), [agents, user]);
 
   // Stable key for matching a request to its decision record
-  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}`;
+  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.timestamp||''}`;
 
   const pendingSwaps = useMemo(() => {
     // Build set of swap keys that already have a APPROVE or DENY decision
