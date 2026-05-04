@@ -30,6 +30,18 @@ const tsKey   = () => new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ }
 const phNowDate = () => new Date().toLocaleDateString('en-PH', { timeZone: PH_TZ });
 const phNowTime = () => new Date().toLocaleTimeString('en-PH', { timeZone: PH_TZ });
 
+// Week-start key (Monday 00:00 PH) — the bucket for the weekly day-off swap cap.
+// All swap records carry their weekStart so server + client agree on the window.
+const weekStartKey = ts => {
+  const d = new Date(ts);
+  const ymd = d.toLocaleDateString('en-CA', { timeZone: PH_TZ });
+  const dow = new Date(ymd + 'T12:00:00+08:00').getDay(); // 0=Sun..6=Sat
+  const offset = dow === 0 ? 6 : dow - 1; // days back to Monday
+  const monday = new Date(new Date(ymd + 'T12:00:00+08:00').getTime() - offset * 86_400_000);
+  return monday.toLocaleDateString('en-CA', { timeZone: PH_TZ });
+};
+const currentWeekKey = () => weekStartKey(Date.now());
+
 // Stable unique ID for an announcement — used for seen/ack tracking.
 // Composed from fields that Sheets always returns as plain text,
 // so it's immune to timestamp format changes across environments.
@@ -467,6 +479,9 @@ function AppInner() {
   const [editAgent,  setEditAgent] = useState(null);  // agent obj being edited by manager
   const [resetAgent, setResetAgent]= useState(null);  // agent whose password the manager is resetting
   const [statsModal, setStatsModal]= useState(false); // agent's own attendance + earnings preview
+  const [showLoginPw, setShowLoginPw] = useState(false); // toggle password visibility on login form
+  const [soloModal, setSoloModal]  = useState(false); // solo day-off-swap modal (move only my own off)
+  const [soloTargetDay, setSoloTargetDay] = useState(null); // 0-6 selected new day-off for solo swap
 
   // ── forms ──
   const [reg,   setReg]  = useState({ name: '', pin: '', platform: 'META', shift: 'Morning', position: POSITIONS[0] });
@@ -857,16 +872,67 @@ function AppInner() {
     }
   };
 
-  // ── SWAP ──
+  // ── SWAP — PARTNER (exchange day-offs with another agent) ──
+  // Records the full exchange context so the manager UI can show what's
+  // changing and so weekly cap accounting works without re-reading state.
   const doSwapRequest = async () => {
     if (!swapTarget) return showToast('Select a target agent', 'err');
+    if (!myDayOffSet) return showToast('Set your day off before requesting a swap', 'err');
+    if (myWeeklyLocked) return showToast('You already used your weekly swap', 'err');
+    if (usedWeeklySlot.has(swapTarget)) return showToast(`${swapTarget} already used their weekly swap`, 'err');
+    const partner = agents.find(a => a.name === swapTarget);
+    if (!partner) return showToast('Partner not found', 'err');
+    const myOff      = Number(dayOffs[user.name]);
+    const partnerOff = Number(dayOffs[partner.name]);
+    if (!isFinite(partnerOff)) return showToast('Partner has no day off set', 'err');
+    if (myOff === partnerOff) return showToast('Day-offs are identical — nothing to swap', 'err');
     setBusy(true);
     await post({
       date: phNowDate(), time: phNowTime(), action: 'SWAP_REQUEST', agent: user.name, timestamp: Date.now(),
-      device: JSON.stringify({ from: user.name, to: swapTarget, fromShift: user.shift || 'Morning', toShift: agents.find(a => a.name === swapTarget)?.shift || 'Morning', platform: user.platform, note: swapNote, status: 'pending' }),
+      device: JSON.stringify({
+        swapType: 'partner',
+        from: user.name, to: swapTarget,
+        fromShift: user.shift || 'Morning',
+        toShift: partner.shift || 'Morning',
+        fromDayOff: myOff,
+        toDayOff: partnerOff,
+        platform: user.platform,
+        note: swapNote,
+        weekStart: currentWeekKey(),
+        status: 'pending',
+      }),
     });
     showToast('Swap request sent!');
     setSwapModal(false); setSwapTarget(''); setSwapNote('');
+    await fetch_(); setBusy(false);
+  };
+
+  // ── SWAP — SOLO (move only my own day-off, no partner) ──
+  const doSoloSwapRequest = async () => {
+    if (!myDayOffSet) return showToast('Set your day off first', 'err');
+    if (myWeeklyLocked) return showToast('You already used your weekly swap', 'err');
+    if (soloTargetDay === null || soloTargetDay === undefined) return showToast('Pick a new day off', 'err');
+    const myOff = Number(dayOffs[user.name]);
+    if (Number(soloTargetDay) === myOff) return showToast('That is already your day off', 'err');
+    setBusy(true);
+    await post({
+      date: phNowDate(), time: phNowTime(), action: 'SWAP_REQUEST', agent: user.name, timestamp: Date.now(),
+      device: JSON.stringify({
+        swapType: 'solo',
+        from: user.name, to: null,
+        fromShift: user.shift || 'Morning',
+        toShift: null,
+        fromDayOff: myOff,
+        toDayOff: null,
+        targetDayOff: Number(soloTargetDay),
+        platform: user.platform,
+        note: swapNote,
+        weekStart: currentWeekKey(),
+        status: 'pending',
+      }),
+    });
+    showToast('Solo swap request sent!');
+    setSoloModal(false); setSoloTargetDay(null); setSwapNote('');
     await fetch_(); setBusy(false);
   };
 
@@ -874,24 +940,87 @@ function AppInner() {
   // record never carries a stale `action: 'SWAP_REQUEST'`. We also stash the
   // original request's timestamp as `reqTimestamp` so swapKey() can match
   // request ↔ decision regardless of when each row was written.
+  //
+  // Approving a request also auto-denies any other pending request involving
+  // the same agent(s) for the same week — preventing the cap from being
+  // exceeded by manager double-clicks or stale UI.
   const doSwapDecision = async (req, decision) => {
     setBusy(true);
+
+    // Race-condition recheck: if approving, make sure neither party has
+    // already used their weekly slot via another approval that landed first.
+    if (decision === 'approve') {
+      if (usedWeeklySlot.has(req.from)) {
+        showToast(`${req.from} already used their weekly swap`, 'err');
+        setBusy(false);
+        return;
+      }
+      if (req.swapType !== 'solo' && req.to && usedWeeklySlot.has(req.to)) {
+        showToast(`${req.to} already used their weekly swap`, 'err');
+        setBusy(false);
+        return;
+      }
+    }
+
+    const decTs = Date.now();
+    const reqWeek = req.weekStart || weekStartKey(req.timestamp || decTs);
+
     await post({
       date: phNowDate(), time: phNowTime(),
       action: decision === 'approve' ? 'SWAP_APPROVE' : 'SWAP_DENY',
-      agent: user.name, timestamp: Date.now(),
+      agent: user.name, timestamp: decTs,
       device: JSON.stringify({
+        swapType: req.swapType || 'partner',
         from: req.from,
         to: req.to,
         fromShift: req.fromShift,
         toShift: req.toShift,
+        fromDayOff: req.fromDayOff,
+        toDayOff: req.toDayOff,
+        targetDayOff: req.targetDayOff,
         platform: req.platform,
         note: req.note,
+        weekStart: reqWeek,
         reqTimestamp: req.timestamp,
         status: decision === 'approve' ? 'approved' : 'denied',
         decidedBy: user.name,
       }),
     });
+
+    // Auto-deny any other PENDING request this week that involves the same
+    // agents — they're now ineligible because the slot is consumed.
+    if (decision === 'approve') {
+      const conflictParties = new Set([req.from]);
+      if (req.swapType !== 'solo' && req.to) conflictParties.add(req.to);
+      const conflicts = pendingSwaps.filter(p => {
+        if (swapKey(p) === swapKey(req)) return false; // not the one we just approved
+        const pWeek = p.weekStart || weekStartKey(p.timestamp || 0);
+        if (pWeek !== reqWeek) return false;
+        const involves = (p.from && conflictParties.has(p.from)) || (p.to && conflictParties.has(p.to));
+        return involves;
+      });
+      // Fire conflict denials in parallel — these are best-effort
+      await Promise.all(conflicts.map(c => post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'SWAP_DENY',
+        agent: user.name, timestamp: Date.now(),
+        device: JSON.stringify({
+          swapType: c.swapType || 'partner',
+          from: c.from, to: c.to,
+          fromShift: c.fromShift, toShift: c.toShift,
+          fromDayOff: c.fromDayOff, toDayOff: c.toDayOff,
+          targetDayOff: c.targetDayOff,
+          platform: c.platform, note: c.note,
+          weekStart: c.weekStart || pWeek,
+          reqTimestamp: c.timestamp,
+          status: 'denied',
+          decidedBy: user.name,
+          autoDenied: true,
+          autoDenyReason: 'Weekly slot consumed by a different approval',
+        }),
+      }).catch(() => {})));
+    }
+
     showToast(decision === 'approve' ? 'Swap approved!' : 'Swap denied.');
     await fetch_(); setBusy(false);
   };
@@ -956,12 +1085,79 @@ function AppInner() {
     showToast(dayOfWeek !== null ? `Day off set: ${DAY_NAMES[dayOfWeek]}` : 'Day off cleared');
   };
 
+  // Stable key for matching a request to its decision record.
+  // Decisions carry `reqTimestamp` (the original request's timestamp) so they
+  // resolve to the same key as the request. Fallback to `timestamp` for raw requests.
+  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.reqTimestamp || s.timestamp || ''}`;
+
+  // ── WEEKLY DAY-OFF SWAP STATE ─────────────────────────────────────────
+  // Declared here (before isOnDayOff) so the useCallback below can read
+  // `effectiveDayOffs` without hitting the const-declaration TDZ.
+  const _latestSwapByKey = useMemo(() => {
+    const map = {};
+    swapReqs.forEach(s => {
+      const k = swapKey(s);
+      if (!map[k]) { map[k] = s; return; }
+      const cur = map[k];
+      const isDecision = s.action === 'SWAP_APPROVE' || s.action === 'SWAP_DENY';
+      const curIsDecision = cur.action === 'SWAP_APPROVE' || cur.action === 'SWAP_DENY';
+      if (isDecision && !curIsDecision) map[k] = s;
+      else if (isDecision && curIsDecision && (Number(s.timestamp)||0) > (Number(cur.timestamp)||0)) map[k] = s;
+    });
+    return map;
+  }, [swapReqs]); // eslint-disable-line
+
+  // All swaps that landed in the current PH week, deduped to one record per key.
+  const swapsThisWeek = useMemo(() => {
+    const wk = currentWeekKey();
+    return Object.values(_latestSwapByKey).filter(s => (s.weekStart || weekStartKey(s.reqTimestamp || s.timestamp || 0)) === wk);
+  }, [_latestSwapByKey]);
+
+  // Set of agent names who already used their one weekly swap slot
+  // (one APPROVED swap per agent per week, partner OR solo counts).
+  const usedWeeklySlot = useMemo(() => {
+    const used = new Set();
+    swapsThisWeek.forEach(s => {
+      const approved = s.action === 'SWAP_APPROVE' || s.status === 'approved';
+      if (!approved) return;
+      if (s.from) used.add(s.from);
+      if (s.swapType !== 'solo' && s.to) used.add(s.to);
+    });
+    return used;
+  }, [swapsThisWeek]);
+
+  // Effective day-off per agent for THIS week: defaults to dayOffs[name],
+  // but the latest approved swap this week may have moved it.
+  const effectiveDayOffs = useMemo(() => {
+    const eff = { ...dayOffs };
+    const approved = swapsThisWeek
+      .filter(s => s.action === 'SWAP_APPROVE' || s.status === 'approved')
+      .sort((a,b) => (Number(a.timestamp)||0) - (Number(b.timestamp)||0));
+    approved.forEach(s => {
+      if (s.swapType === 'solo' && s.from && s.targetDayOff !== undefined && s.targetDayOff !== null) {
+        eff[s.from] = Number(s.targetDayOff);
+      } else if (s.from && s.to && s.fromDayOff !== undefined && s.toDayOff !== undefined) {
+        eff[s.from] = Number(s.toDayOff);
+        eff[s.to]   = Number(s.fromDayOff);
+      }
+    });
+    return eff;
+  }, [dayOffs, swapsThisWeek]);
+
+  // Convenience flags for the logged-in user
+  const myDayOffSet     = user && (dayOffs[user.name] !== undefined && dayOffs[user.name] !== null);
+  const myWeeklyLocked  = user && usedWeeklySlot.has(user.name);
+
   // Helper: is a given agent on day off RIGHT NOW (PH time)?
+  // Reads from `effectiveDayOffs` so an approved swap this week takes effect
+  // immediately for both clock-in gating and UI labelling.
   const isOnDayOff = useCallback((agentName) => {
-    const dow = dayOffs[agentName];
+    const dow = (effectiveDayOffs && effectiveDayOffs[agentName] !== undefined)
+      ? effectiveDayOffs[agentName]
+      : dayOffs[agentName];
     if (dow === undefined || dow === null) return false;
     return todayDowPH() === Number(dow);
-  }, [dayOffs]);
+  }, [dayOffs, effectiveDayOffs]);
 
   // ── ANNOUNCE ──
   const doAnnounce = async () => {
@@ -1083,6 +1279,7 @@ function AppInner() {
   const sPct      = Math.min(shMs / SHIFT_GOAL * 100, 100);
   const agentSt   = (user?.role === ROLE_MANAGER || user?.role === ROLE_FINANCE) ? ST.ONCALL
     : rec.onPause ? ST.PAUSED : rec.onBreak ? ST.BREAK : (rec.clockIn && !rec.clockedOut) ? ST.ACTIVE : ST.PENDING;
+
 
   // ── ATTENDANCE SUMMARY ──
   const attend = useMemo(() => {
@@ -1258,19 +1455,28 @@ function AppInner() {
     });
   }, [attend, kpiData, kpiAgentMatch]);
 
-  // ── SWAP ELIGIBILITY — same platform AND same shift ──
-  const swapEligible = useMemo(() =>
-    agents.filter(a =>
+  // ── SWAP ELIGIBILITY ──
+  // For a PARTNER day-off swap, the candidate must be:
+  //   - active agent (not me)
+  //   - same platform AND same shift
+  //   - has a day-off assigned, AND that day-off DIFFERS from mine
+  //     (no point swapping identical days off)
+  //   - hasn't already used their one approved swap this week
+  // I (the requester) must also have a day-off set and not be locked this week.
+  const swapEligible = useMemo(() => {
+    if (!user) return [];
+    if (!myDayOffSet || myWeeklyLocked) return [];
+    const myOff = dayOffs[user.name];
+    return agents.filter(a =>
       a.status === 'active' && a.role === ROLE_AGENT &&
-      a.name !== user?.name &&
-      (a.shift || 'Morning') === (user?.shift || 'Morning') &&
-      a.platform === user?.platform
-    ), [agents, user]);
-
-  // Stable key for matching a request to its decision record.
-  // Decisions carry `reqTimestamp` (the original request's timestamp) so they
-  // resolve to the same key as the request. Fallback to `timestamp` for raw requests.
-  const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.reqTimestamp || s.timestamp || ''}`;
+      a.name !== user.name &&
+      (a.shift || 'Morning') === (user.shift || 'Morning') &&
+      a.platform === user.platform &&
+      dayOffs[a.name] !== undefined && dayOffs[a.name] !== null &&
+      Number(dayOffs[a.name]) !== Number(myOff) &&
+      !usedWeeklySlot.has(a.name)
+    );
+  }, [agents, user, dayOffs, myDayOffSet, myWeeklyLocked, usedWeeklySlot]);
 
   const pendingSwaps = useMemo(() => {
     // Build set of swap keys that already have an APPROVE or DENY decision
@@ -1434,7 +1640,16 @@ function AppInner() {
               <label className="lbl">USERNAME</label>
               <input className="inp gap" placeholder="Your name" autoCapitalize="off" autoCorrect="off" autoComplete="username" onChange={e => setLogF({ ...logF, name: e.target.value })} />
               <label className="lbl">PASSWORD</label>
-              <input className="inp" style={{ marginBottom: 20 }} type="password" autoComplete="current-password" onChange={e => setLogF({ ...logF, pin: e.target.value })} />
+              <div style={{ position: 'relative', marginBottom: 20 }}>
+                <input className="inp" style={{ paddingRight: 70 }} type={showLoginPw ? 'text' : 'password'} autoComplete="current-password" onChange={e => setLogF({ ...logF, pin: e.target.value })} />
+                <button type="button" onClick={() => setShowLoginPw(v => !v)}
+                  style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+                    background: 'rgba(255,255,255,.05)', border: '1px solid rgba(255,255,255,.08)', color: 'var(--sub)',
+                    fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 700, letterSpacing: 1.5,
+                    padding: '6px 12px', borderRadius: 8, cursor: 'pointer', minHeight: 32 }}>
+                  {showLoginPw ? 'HIDE' : 'SHOW'}
+                </button>
+              </div>
               {err && <div className="alert aer gap">⚠ {err}</div>}
               <button className="btn bt bw" onClick={doLogin}>ENTER</button>
               <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setView('landing')}>← BACK</button>
@@ -1458,6 +1673,12 @@ function AppInner() {
                     <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 1 }}>
                       {user.position || 'Customer Service Agent'} · {sh.label} Shift ({sh.start}–{sh.end})
                       {dayOffs[user.name] !== undefined && <span style={{ color: 'var(--amber)', marginLeft: 6 }}>· Day Off: Every {DAY_NAMES[dayOffs[user.name]]}</span>}
+                      {effectiveDayOffs[user.name] !== undefined && dayOffs[user.name] !== undefined &&
+                        Number(effectiveDayOffs[user.name]) !== Number(dayOffs[user.name]) && (
+                        <span style={{ color: 'var(--purple)', marginLeft: 6, fontWeight: 700 }}>
+                          · ↺ Swapped to {DAY_NAMES[effectiveDayOffs[user.name]]} this week
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1614,7 +1835,14 @@ function AppInner() {
                   );
                 })()}
                 <div className="g2sm">
-                    <button className="btn bb" style={{ fontSize: 11 }} onClick={() => setSwapModal(true)}>⇄ SWAP SHIFT</button>
+                    <button className="btn bb" style={{ fontSize: 11 }} disabled={!myDayOffSet || myWeeklyLocked} onClick={() => setSwapModal(true)}
+                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your weekly swap' : ''}>
+                      ⇄ SWAP DAY OFF{myWeeklyLocked ? ' (LOCKED)' : ''}
+                    </button>
+                    <button className="btn bp" style={{ fontSize: 11 }} disabled={!myDayOffSet || myWeeklyLocked} onClick={() => setSoloModal(true)}
+                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your weekly swap' : ''}>
+                      ↺ MOVE MY OFF
+                    </button>
                     <button className="btn br" style={{ fontSize: 11 }} onClick={() => setEscalModal(true)}>🚨 ESCALATE</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={() => setMemoModal(true)}>📝 MEMO</button>
                     <button className="btn bt" style={{ fontSize: 11 }} onClick={() => setStatsModal(true)}>📊 MY STATS</button>
@@ -1627,16 +1855,26 @@ function AppInner() {
                     <SectionHead>Swap Results</SectionHead>
                     {mySwaps.slice(0, 5).map((s, i) => {
                       const approved = s.action === 'SWAP_APPROVE' || s.status === 'approved';
-                      const denied   = s.action === 'SWAP_DENY'    || s.status === 'denied';
+                      const isSolo = s.swapType === 'solo';
                       return (
                         <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                            <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
+                                <Chip color={isSolo ? 'var(--purple)' : 'var(--blue)'} small>{isSolo ? '↺ SOLO' : '⇄ PARTNER'}</Chip>
+                                {s.autoDenied && <Chip color="var(--sub)" small>AUTO</Chip>}
+                              </div>
                               <div style={{ fontSize: 12, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>
-                                {s.from === user.name ? `You → ${s.to}` : `${s.from} → You`} · {s.fromShift}
+                                {isSolo
+                                  ? `${DAY_NAMES[s.fromDayOff] || '?'} → ${DAY_NAMES[s.targetDayOff] || '?'}`
+                                  : (s.from === user.name
+                                      ? `You (${DAY_NAMES[s.fromDayOff] || '?'}) ⇄ ${s.to} (${DAY_NAMES[s.toDayOff] || '?'})`
+                                      : `${s.from} (${DAY_NAMES[s.fromDayOff] || '?'}) ⇄ You (${DAY_NAMES[s.toDayOff] || '?'})`)
+                                }
                               </div>
                               {s.note && <div style={{ fontSize: 11, color: 'var(--sub)', marginTop: 2, fontStyle: 'italic' }}>"{s.note}"</div>}
-                              {s.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>by {s.decidedBy}</div>}
+                              {s.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>by {s.decidedBy}{s.weekStart ? ` · week of ${s.weekStart}` : ''}</div>}
+                              {s.autoDenied && s.autoDenyReason && <div style={{ fontSize: 10, color: 'var(--amber)', marginTop: 2, fontFamily: 'var(--mono)' }}>↳ {s.autoDenyReason}</div>}
                             </div>
                             <Chip color={approved ? 'var(--teal)' : 'var(--red)'}>
                               {approved ? '✓ APPROVED' : '✕ DENIED'}
@@ -1963,17 +2201,41 @@ function AppInner() {
                   <SectionHead>Pending Swap Requests</SectionHead>
                   {pendingSwaps.length === 0
                     ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '16px 0', fontSize: 13 }}>No pending swaps.</div>
-                    : pendingSwaps.map((s, i) => (
+                    : pendingSwaps.map((s, i) => {
+                      const isSolo = s.swapType === 'solo';
+                      return (
                       <div key={i} style={{ padding: 14, borderRadius: 12, marginBottom: 10, background: 'rgba(0,0,0,.3)', border: '1px solid rgba(255,255,255,.07)' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-                          <div>
-                            <div style={{ fontWeight: 700, fontSize: 14 }}>
-                              <span style={{ color: 'var(--teal)' }}>{s.from}</span>
-                              <span style={{ color: 'var(--sub)', margin: '0 8px' }}>⇄</span>
-                              <span style={{ color: 'var(--blue)' }}>{s.to}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+                              <Chip color={isSolo ? 'var(--purple)' : 'var(--blue)'} small>{isSolo ? '↺ SOLO' : '⇄ PARTNER'}</Chip>
+                              <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>week of {s.weekStart || '?'}</span>
                             </div>
-                            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>
-                              {s.platform} · {s.fromShift} shift · {s.date}
+                            <div style={{ fontWeight: 700, fontSize: 14 }}>
+                              {isSolo
+                                ? <>
+                                    <span style={{ color: 'var(--teal)' }}>{s.from}</span>
+                                    <span style={{ color: 'var(--sub)', margin: '0 8px' }}>moves day off</span>
+                                  </>
+                                : <>
+                                    <span style={{ color: 'var(--teal)' }}>{s.from}</span>
+                                    <span style={{ color: 'var(--sub)', margin: '0 8px' }}>⇄</span>
+                                    <span style={{ color: 'var(--blue)' }}>{s.to}</span>
+                                  </>
+                              }
+                            </div>
+                            <div style={{ fontSize: 12, color: 'var(--text)', fontFamily: 'var(--mono)', marginTop: 4 }}>
+                              {isSolo
+                                ? <>{DAY_NAMES[s.fromDayOff] || '?'} <span style={{ color: 'var(--purple)' }}>→</span> <strong style={{ color: 'var(--purple)' }}>{DAY_NAMES[s.targetDayOff] || '?'}</strong></>
+                                : <>
+                                    {s.from}: {DAY_NAMES[s.fromDayOff] || '?'} <span style={{ color: 'var(--purple)' }}>→</span> {DAY_NAMES[s.toDayOff] || '?'}
+                                    <span style={{ margin: '0 8px', color: 'var(--sub)' }}>·</span>
+                                    {s.to}: {DAY_NAMES[s.toDayOff] || '?'} <span style={{ color: 'var(--purple)' }}>→</span> {DAY_NAMES[s.fromDayOff] || '?'}
+                                  </>
+                              }
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 4 }}>
+                              {s.platform} · {s.fromShift} shift · requested {s.date}
                             </div>
                             {s.note && <div style={{ fontSize: 12, color: 'var(--text)', marginTop: 5, fontStyle: 'italic' }}>"{s.note}"</div>}
                           </div>
@@ -1983,7 +2245,8 @@ function AppInner() {
                           </div>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                 </Glass>
                 <Glass>
                   <SectionHead>Swap History</SectionHead>
@@ -2086,16 +2349,21 @@ function AppInner() {
                   <SectionHead>Weekly Day-Off Roster</SectionHead>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginBottom: 8 }}>
                     {DAY_NAMES.map((day, dow) => {
-                      const offAgents = agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT && dayOffs[a.name] === dow);
+                      const offAgents = agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT && Number(effectiveDayOffs[a.name]) === dow);
                       const isToday = todayDowPH() === dow;
                       return (
                         <div key={dow} style={{ borderRadius: 12, padding: '10px 8px', background: isToday ? 'rgba(56,189,248,0.1)' : 'rgba(0,0,0,0.25)', border: `1px solid ${isToday ? 'rgba(56,189,248,0.35)' : 'rgba(255,255,255,0.07)'}`, textAlign: 'center', minHeight: 80 }}>
                           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 1, fontFamily: 'var(--mono)', color: isToday ? 'var(--blue)' : 'var(--sub)', marginBottom: 6 }}>{DAY_SHORT[dow]}{isToday ? ' ←' : ''}</div>
                           {offAgents.length === 0
                             ? <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.15)', fontFamily: 'var(--mono)' }}>—</div>
-                            : offAgents.map(a => (
-                              <div key={a.name} style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)', fontFamily: 'var(--mono)', marginBottom: 2, lineHeight: 1.4 }}>🏖 {a.name}</div>
-                            ))
+                            : offAgents.map(a => {
+                              const swapped = dayOffs[a.name] !== undefined && Number(dayOffs[a.name]) !== dow;
+                              return (
+                                <div key={a.name} style={{ fontSize: 9, fontWeight: 700, color: swapped ? 'var(--purple)' : 'var(--amber)', fontFamily: 'var(--mono)', marginBottom: 2, lineHeight: 1.4 }} title={swapped ? `Normally off ${DAY_NAMES[dayOffs[a.name]]} — swapped this week` : ''}>
+                                  {swapped ? '⇄' : '🏖'} {a.name}{swapped ? ' *' : ''}
+                                </div>
+                              );
+                            })
                           }
                         </div>
                       );
@@ -2103,8 +2371,42 @@ function AppInner() {
                   </div>
                   <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', textAlign: 'center', marginTop: 4 }}>
                     {Object.keys(dayOffs).length} / {agents.filter(a=>a.status==='active'&&a.role===ROLE_AGENT).length} agents have day off assigned
+                    {swapsThisWeek.some(s => s.action === 'SWAP_APPROVE' || s.status === 'approved') && (
+                      <span style={{ color: 'var(--purple)', marginLeft: 8 }}>· ⇄ = swapped this week</span>
+                    )}
                   </div>
                 </Glass>
+
+                {/* Active Swaps — This Week */}
+                {(() => {
+                  const active = swapsThisWeek.filter(s => s.action === 'SWAP_APPROVE' || s.status === 'approved');
+                  if (active.length === 0) return null;
+                  return (
+                    <Glass>
+                      <SectionHead>
+                        Active Swaps — This Week
+                        <Chip color="var(--purple)">⇄ {active.length}</Chip>
+                      </SectionHead>
+                      {active.map((s, i) => {
+                        const isSolo = s.swapType === 'solo';
+                        return (
+                          <div key={i} style={{ padding: '10px 12px', borderRadius: 10, marginBottom: 8, background: 'rgba(192,132,252,0.06)', border: '1px solid rgba(192,132,252,0.2)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <Chip color={isSolo ? 'var(--purple)' : 'var(--blue)'} small>{isSolo ? '↺ SOLO' : '⇄ PARTNER'}</Chip>
+                              <span style={{ fontWeight: 700, fontSize: 13 }}>
+                                {isSolo
+                                  ? `${s.from}: ${DAY_NAMES[s.fromDayOff] || '?'} → ${DAY_NAMES[s.targetDayOff] || '?'}`
+                                  : `${s.from} (${DAY_NAMES[s.fromDayOff] || '?'}) ⇄ ${s.to} (${DAY_NAMES[s.toDayOff] || '?'})`}
+                              </span>
+                              <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{s.date} · by {s.decidedBy || '—'}</span>
+                            </div>
+                            {s.note && <div style={{ fontSize: 11, color: 'var(--sub)', fontStyle: 'italic', marginTop: 4 }}>"{s.note}"</div>}
+                          </div>
+                        );
+                      })}
+                    </Glass>
+                  );
+                })()}
 
                 {/* Per-agent day off assignment */}
                 <Glass>
@@ -2415,31 +2717,103 @@ function AppInner() {
         </div>
       )}
 
-      {/* Swap Request */}
+      {/* Swap Request — PARTNER (exchange day-offs) */}
       {swapModal && (
         <div className="overlay" onClick={() => setSwapModal(false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="drag" />
-            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Request Shift Swap</div>
-            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>SAME DEPARTMENT + SAME SHIFT · MANAGER APPROVAL REQUIRED</div>
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>⇄ Swap Day Off — Partner</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>EXCHANGE DAY-OFFS WITH A TEAMMATE · MANAGER APPROVAL · ONE PER WEEK</div>
             {user && (() => { const sh = resolveShift(user.shift || 'Morning'); return (
               <div className="alert aok" style={{ marginBottom: 14 }}>
-                Your shift: <strong>{user.platform} · {sh.label} ({sh.start}–{sh.end}{sh.overnight ? ' +1' : ''})</strong>
+                You: <strong>{user.platform} · {sh.label}</strong> · Day off: <strong>{myDayOffSet ? DAY_NAMES[dayOffs[user.name]] : 'NOT SET'}</strong>
               </div>
             ); })()}
-            {swapEligible.length === 0
-              ? <div className="alert awn" style={{ marginBottom: 14 }}>No agents in {user?.platform} on the {resolveShift(user?.shift || 'Morning').label} shift available to swap with.</div>
-              : <>
-                <label className="lbl">SELECT AGENT TO SWAP WITH</label>
-                <select className="inp gap" value={swapTarget} onChange={e => setSwapTarget(e.target.value)}>
-                  <option value="">— Choose agent —</option>
-                  {swapEligible.map(a => <option key={a.name} value={a.name}>{a.name} · {a.position || 'Agent'}</option>)}
-                </select>
-                <label className="lbl">REASON (OPTIONAL)</label>
-                <textarea className="inp" style={{ minHeight: 80, marginBottom: 18 }} placeholder="Reason for swap request..." value={swapNote} onChange={e => setSwapNote(e.target.value)} />
-                <button className="btn bt bw" onClick={doSwapRequest}>SEND REQUEST</button>
-              </>}
+            {!myDayOffSet
+              ? <div className="alert aer" style={{ marginBottom: 14 }}>You don't have a day off assigned yet. Ask your manager to set one before requesting a swap.</div>
+              : myWeeklyLocked
+                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one weekly swap. The cap resets every Monday (PH).</div>
+                : swapEligible.length === 0
+                  ? <div className="alert awn" style={{ marginBottom: 14 }}>No teammates in {user?.platform} on your shift have a different day off and an unused weekly slot.</div>
+                  : <>
+                    <label className="lbl">SELECT PARTNER</label>
+                    <select className="inp gap" value={swapTarget} onChange={e => setSwapTarget(e.target.value)}>
+                      <option value="">— Choose teammate —</option>
+                      {swapEligible.map(a => <option key={a.name} value={a.name}>{a.name} · day off: {DAY_NAMES[dayOffs[a.name]]}</option>)}
+                    </select>
+                    {swapTarget && (() => {
+                      const partner = agents.find(a => a.name === swapTarget);
+                      const myOff = DAY_NAMES[dayOffs[user.name]];
+                      const partnerOff = partner ? DAY_NAMES[dayOffs[partner.name]] : '?';
+                      return (
+                        <div style={{ padding: 12, borderRadius: 12, background: 'rgba(56,189,248,0.07)', border: '1px solid rgba(56,189,248,0.25)', marginBottom: 14 }}>
+                          <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 1.5, marginBottom: 8 }}>PROPOSED EXCHANGE — THIS WEEK ONLY</div>
+                          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', gap: 8, fontFamily: 'var(--mono)', fontSize: 12 }}>
+                            <div style={{ textAlign: 'center', flex: 1 }}>
+                              <div style={{ fontWeight: 700, color: 'var(--teal)' }}>{user.name}</div>
+                              <div style={{ color: 'var(--sub)', marginTop: 2 }}>{myOff} → <span style={{ color: 'var(--purple)', fontWeight: 700 }}>{partnerOff}</span></div>
+                            </div>
+                            <div style={{ fontSize: 18 }}>⇄</div>
+                            <div style={{ textAlign: 'center', flex: 1 }}>
+                              <div style={{ fontWeight: 700, color: 'var(--blue)' }}>{swapTarget}</div>
+                              <div style={{ color: 'var(--sub)', marginTop: 2 }}>{partnerOff} → <span style={{ color: 'var(--purple)', fontWeight: 700 }}>{myOff}</span></div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    <label className="lbl">REASON (OPTIONAL)</label>
+                    <textarea className="inp" style={{ minHeight: 70, marginBottom: 18 }} placeholder="Why do you need this swap..." value={swapNote} onChange={e => setSwapNote(e.target.value)} />
+                    <button className="btn bt bw" disabled={busy || !swapTarget} onClick={doSwapRequest}>SEND REQUEST</button>
+                  </>}
             <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setSwapModal(false)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Solo Swap — move my own day-off, no partner */}
+      {soloModal && user && (
+        <div className="overlay" onClick={() => setSoloModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>↺ Move My Day Off — Solo</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>SHIFT YOUR OWN DAY-OFF FOR THIS WEEK · MANAGER APPROVAL · ONE PER WEEK</div>
+            {!myDayOffSet
+              ? <div className="alert aer" style={{ marginBottom: 14 }}>You don't have a day off assigned yet.</div>
+              : myWeeklyLocked
+                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one weekly swap.</div>
+                : <>
+                  <div className="alert aok" style={{ marginBottom: 14 }}>
+                    Current day off: <strong>{DAY_NAMES[dayOffs[user.name]]}</strong>
+                  </div>
+                  <label className="lbl">PICK A NEW DAY OFF FOR THIS WEEK</label>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 14 }}>
+                    {DAY_NAMES.map((day, dow) => {
+                      const isCurrent = Number(dayOffs[user.name]) === dow;
+                      const isPicked = soloTargetDay === dow;
+                      return (
+                        <button key={dow} className={`btn ${isPicked ? 'bp' : 'bg'}`}
+                          disabled={isCurrent}
+                          style={{ fontSize: 11, minHeight: 40, padding: '7px 6px', opacity: isCurrent ? 0.4 : 1 }}
+                          onClick={() => setSoloTargetDay(dow)}>
+                          {DAY_SHORT[dow]}{isCurrent ? ' •' : ''}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {soloTargetDay !== null && soloTargetDay !== undefined && (
+                    <div style={{ padding: 12, borderRadius: 12, background: 'rgba(192,132,252,0.07)', border: '1px solid rgba(192,132,252,0.25)', marginBottom: 14, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 13 }}>
+                      <span style={{ color: 'var(--sub)' }}>{DAY_NAMES[dayOffs[user.name]]}</span>
+                      <span style={{ margin: '0 8px', color: 'var(--purple)' }}>→</span>
+                      <span style={{ color: 'var(--purple)', fontWeight: 700 }}>{DAY_NAMES[soloTargetDay]}</span>
+                      <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 4 }}>this week only</div>
+                    </div>
+                  )}
+                  <label className="lbl">REASON (OPTIONAL)</label>
+                  <textarea className="inp" style={{ minHeight: 70, marginBottom: 18 }} placeholder="Why are you moving your day off..." value={swapNote} onChange={e => setSwapNote(e.target.value)} />
+                  <button className="btn bp bw" disabled={busy || soloTargetDay === null || soloTargetDay === undefined} onClick={doSoloSwapRequest}>SEND REQUEST</button>
+                </>}
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => { setSoloModal(false); setSoloTargetDay(null); }}>CANCEL</button>
           </div>
         </div>
       )}
