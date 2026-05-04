@@ -9,8 +9,23 @@ const MGR_KEY  = 'AFTERSALES-BOSS-2026';
 const FIN_KEY  = 'AFTERSALES-FINANCE-2026';
 const BREAK_MAX  = 3_600_000;   // 1 h — included in 8 h shift
 const SHIFT_GOAL = 28_800_000;  // 8 h total (7h work + 1h break)
-const LATE_GRACE = 900_000;     // 15 min grace period
+const LATE_GRACE = 5 * 60_000;  // 5 min grace period (was 15)
+const LATE_LOCK_THRESHOLD = 30 * 60_000; // 30 min late → system locks, manager unlock required
+const SHIFT_GRACE = 2 * 3_600_000;       // 2 h grace window after scheduled shift end
+const PAUSE_MAX   = 2 * 3_600_000;       // 2 h max cumulative duty pause per shift
+const CLOCK_IN_EARLY = 10 * 60_000;      // can clock in up to 10 min before scheduled start
 const WORKING_DAYS = 26;        // standard monthly working days for salary calc
+
+// Helpwave quotas (tickets per shift)
+const HW_QUOTA_JUNIOR = 60;
+const HW_QUOTA_SENIOR = 80;
+const SENIOR_POSITIONS = ['Senior Agent', 'Team Lead', 'Quality Analyst'];
+const isSenior = position => SENIOR_POSITIONS.includes(String(position || '').trim());
+const quotaForAgent = agent => {
+  if (!agent) return null;
+  if (String(agent.platform || '').toLowerCase() !== 'helpwave') return null;
+  return isSenior(agent.position) ? HW_QUOTA_SENIOR : HW_QUOTA_JUNIOR;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PH TIMEZONE (UTC+8)
@@ -30,17 +45,20 @@ const tsKey   = () => new Date().toLocaleDateString('en-CA', { timeZone: PH_TZ }
 const phNowDate = () => new Date().toLocaleDateString('en-PH', { timeZone: PH_TZ });
 const phNowTime = () => new Date().toLocaleTimeString('en-PH', { timeZone: PH_TZ });
 
-// Week-start key (Monday 00:00 PH) — the bucket for the weekly day-off swap cap.
-// All swap records carry their weekStart so server + client agree on the window.
-const weekStartKey = ts => {
+// Period key (first day of PH calendar month) — bucket for the monthly swap cap.
+// Records carry their periodKey so server + client agree on the window.
+// Renamed from weekStartKey in v5 — cap changed from once-per-week to once-per-month.
+const monthStartKey = ts => {
   const d = new Date(ts);
   const ymd = d.toLocaleDateString('en-CA', { timeZone: PH_TZ });
-  const dow = new Date(ymd + 'T12:00:00+08:00').getDay(); // 0=Sun..6=Sat
-  const offset = dow === 0 ? 6 : dow - 1; // days back to Monday
-  const monday = new Date(new Date(ymd + 'T12:00:00+08:00').getTime() - offset * 86_400_000);
-  return monday.toLocaleDateString('en-CA', { timeZone: PH_TZ });
+  // YYYY-MM-DD → keep YYYY-MM, append -01
+  return ymd.substring(0, 7) + '-01';
 };
-const currentWeekKey = () => weekStartKey(Date.now());
+const currentPeriodKey = () => monthStartKey(Date.now());
+// Legacy aliases — old swap records stored `weekStart` (Monday). We always
+// re-derive period from the row's timestamp so old data buckets correctly.
+const weekStartKey = monthStartKey; // kept so old code paths don't break
+const currentWeekKey = currentPeriodKey;
 
 // Stable unique ID for an announcement — used for seen/ack tracking.
 // Composed from fields that Sheets always returns as plain text,
@@ -525,6 +543,7 @@ function AppInner() {
   const [escalTitle,   setEscalTitle]  = useState('');
   const [escalDetail,  setEscalDetail] = useState('');
   const [escalUrgent,  setEscalUrgent] = useState(false);
+  const [escalTarget,  setEscalTarget] = useState('manager'); // 'manager' | 'senior' | 'chargeback'
   const [annText,    setAnnText]   = useState('');
   const [annUrgent,  setAnnUrgent] = useState(false);
 
@@ -548,6 +567,13 @@ function AppInner() {
   const [escals,     setEscals]     = useState([]);
   const [escAcks,    setEscAcks]    = useState([]); // ESC_ACK records from server
   const [memos,      setMemos]      = useState([]);
+  // Late-unlock workflow (NEW)
+  const [lateReqs,   setLateReqs]   = useState([]); // LATE_UNLOCK_REQUEST rows
+  const [lateGrants, setLateGrants] = useState([]); // LATE_UNLOCK rows (manager grants)
+  // Helpwave quota shortfalls (clock-outs below target)
+  const [quotaShortfalls, setQuotaShortfalls] = useState([]);
+  // Quota clock-out confirmation modal
+  const [quotaConfirmModal, setQuotaConfirmModal] = useState(null); // { tickets, target } or null
 
   // ── tick ──
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
@@ -656,7 +682,7 @@ function AppInner() {
       const uRows = d.filter(i => USER_ACTIONS.includes(i.action))
         .map(r => ({ ...r, timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() }))
         .sort((a, b) => a.timestamp - b.timestamp); // ASC — latest action wins
-      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET'].includes(i.action))
+      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET','LATE_UNLOCK_REQUEST','LATE_UNLOCK','QUOTA_SHORTFALL'].includes(i.action))
         .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
         .sort((a, b) => b.timestamp - a.timestamp);
 
@@ -681,6 +707,11 @@ function AppInner() {
       const escAcks_ = d.filter(i => i.action === 'ESC_ACK').map(parse);
       const mems_  = d.filter(i => i.action === 'MEMO').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       const acks_  = d.filter(i => i.action === 'ANN_ACK').map(parse);
+      // Late-unlock workflow: requests + grants
+      const lateReqs_   = d.filter(i => i.action === 'LATE_UNLOCK_REQUEST').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const lateGrants_ = d.filter(i => i.action === 'LATE_UNLOCK').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      // Quota shortfalls (Helpwave clock-outs below quota)
+      const shortfalls_ = d.filter(i => i.action === 'QUOTA_SHORTFALL').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       // Build latest day-off per agent (most recent DAYOFF_SET wins)
       const dayOffMap = {};
       d.filter(i => i.action === 'DAYOFF_SET').map(parse)
@@ -729,6 +760,9 @@ function AppInner() {
       setEscals(escs_);
       setEscAcks(escAcks_);
       setMemos(mems_);
+      setLateReqs(lateReqs_);
+      setLateGrants(lateGrants_);
+      setQuotaShortfalls(shortfalls_);
     } catch (e) { console.error(e); }
     setBusy(false);
   }, []);
@@ -769,6 +803,33 @@ function AppInner() {
   }, [statsModal, kpiLoaded, kpiLoading, kpiError, fetchDashboards]);
 
   useEffect(() => { fetch_(); }, [view, fetch_]);
+
+  // ── LIVE-REFRESH POLLING ──────────────────────────────────────────────
+  // Manager: poll attendance/logs/escalations every 30s so clock events,
+  // late unlock requests, and quota shortfalls appear without manual refresh.
+  // Agent: poll every 60s so the quota meter and any manager unlock grants
+  // come through quickly.
+  useEffect(() => {
+    if (!user) return undefined;
+    const isManagerLiveTab = view === 'mgr' && ['attendance','logs','escalations','swaps'].includes(tab);
+    const isAgentLive = view === 'agent';
+    if (!isManagerLiveTab && !isAgentLive) return undefined;
+    const interval = isAgentLive ? 60_000 : 30_000;
+    const t = setInterval(() => { fetch_().catch(console.error); }, interval);
+    return () => clearInterval(t);
+  }, [view, tab, user, fetch_]);
+
+  // Agents on KPI-driven platforms also need fresh ticket counts for the
+  // quota meter — refresh KPI data every 2 minutes while clocked in.
+  // (Reads `recs[user.name]` directly instead of `rec` since `rec` is
+  // declared later in the file — avoiding TDZ in the dep array.)
+  useEffect(() => {
+    if (!user || user.role !== ROLE_AGENT) return undefined;
+    const myRec = recs[user.name] || {};
+    if (!myRec.clockIn || myRec.clockedOut) return undefined;
+    const t = setInterval(() => { fetchDashboards().catch(console.error); }, 120_000);
+    return () => clearInterval(t);
+  }, [user, recs, fetchDashboards]);
 
   const post = p => fetch(HOOK, { method: 'POST', mode: 'no-cors', body: JSON.stringify(p) });
 
@@ -824,7 +885,31 @@ function AppInner() {
   const logout = () => { setUser(null); setView('landing'); };
 
   // ── CLOCK ACTIONS ──
+  // doAction is shared by clockIn, clockOut, breakStart/End, dutyPause/Resume.
+  // Gating happens BEFORE we touch state so a blocked action doesn't write
+  // anything and the user gets a clear message.
   const doAction = async (type) => {
+    // Pre-flight gates
+    if (type === 'clockIn' && lateLockState) {
+      if (lateLockState.state === 'early') {
+        return showToast(`Too early — clock-in opens at ${phTimeShort(lateLockState.earliest)}`, 'err');
+      }
+      if (lateLockState.state === 'locked') {
+        return showToast('Locked — request manager unlock to clock in', 'err');
+      }
+      // 'grace', 'late', 'unlocked' all proceed
+    }
+    if (type === 'dutyPause') {
+      if (pauseAtMax) return showToast('Pause limit reached (2h max per shift)', 'err');
+    }
+    // Helpwave: clock-out below quota → confirmation modal first.
+    // Skip the gate when we're called recursively from the confirmation flow
+    // (the modal calls doConfirmedClockOut directly, not doAction).
+    if (type === 'clockOut' && quotaInfo && quotaInfo.isHelpwave && !quotaInfo.met && !quotaInfo.unknown) {
+      setQuotaConfirmModal({ tickets: quotaInfo.tickets, target: quotaInfo.target });
+      return;
+    }
+
     setBusy(true);
     try {
       const ts    = Date.now();
@@ -839,9 +924,6 @@ function AppInner() {
       if (type === 'clockOut')   { nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 }; }
       setRecs(p => ({ ...p, [user.name]: nx }));
 
-      // ── OPTIMISTIC LOCAL UPDATE ────────────────────────────────────────────
-      // Add the action to the local logs state immediately so the timeline
-      // shows it right away, even before the server responds.
       const localEntry = {
         date:      phNowDate(),
         time:      phNowTime(),
@@ -851,17 +933,11 @@ function AppInner() {
         timestamp: ts,
       };
       setLogs(prev => [localEntry, ...prev]);
-      // ──────────────────────────────────────────────────────────────────────
-
       showToast(AL[type] || type);
 
-      // Send to server, then do a background sync to get the canonical server state.
-      // We await post so the data reaches Sheets before we refetch.
       try {
         await post({ date: localEntry.date, time: localEntry.time, action: type, agent: user.name, device: proof, timestamp: ts });
-      } catch (_) { /* network issue — optimistic entry already shown */ }
-
-      // Background sync (non-blocking — don't await so UI stays fast)
+      } catch (_) {}
       fetch_().catch(console.error);
 
     } catch (e) {
@@ -872,14 +948,89 @@ function AppInner() {
     }
   };
 
+  // Helpwave clock-out confirmation: agent acknowledged they're below quota
+  // and is clocking out anyway. Writes the clock-out AND a QUOTA_SHORTFALL
+  // row so managers see it surfaced on the dashboard.
+  const doConfirmedClockOut = async () => {
+    if (!quotaConfirmModal) return;
+    const { tickets, target } = quotaConfirmModal;
+    setQuotaConfirmModal(null);
+    setBusy(true);
+    try {
+      const ts = Date.now();
+      const proof = await audit().catch(() => navigator.platform);
+      const rec = recs[user?.name] || {};
+      const nx = { clockedOut: true, clockIn: rec.clockIn, clockOutTs: ts, breakUsedMs: rec.breakUsedMs || 0, pauseUsedMs: rec.pauseUsedMs || 0 };
+      setRecs(p => ({ ...p, [user.name]: nx }));
+
+      const localCO = { date: phNowDate(), time: phNowTime(), action: 'clockOut', agent: user.name, device: proof, timestamp: ts };
+      setLogs(prev => [localCO, ...prev]);
+      showToast('Clocked out — manager notified');
+
+      await post({ date: localCO.date, time: localCO.time, action: 'clockOut', agent: user.name, device: proof, timestamp: ts });
+      // Shortfall report (separate row so it shows in its own panel)
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'QUOTA_SHORTFALL', agent: user.name, timestamp: Date.now(),
+        device: JSON.stringify({
+          tickets: Number(tickets), target: Number(target),
+          shortfall: Number(target) - Number(tickets),
+          platform: user.platform, position: user.position,
+          shift: user.shift, isSenior: isSenior(user.position),
+        }),
+      });
+      fetch_().catch(console.error);
+    } catch (e) {
+      console.error('doConfirmedClockOut error:', e);
+      showToast('Clock-out failed', 'err');
+    } finally { setBusy(false); }
+  };
+
+  // Agent: request unlock when 30+ minutes late. Manager sees the request
+  // in the dashboard and either grants (LATE_UNLOCK) or ignores it.
+  const doLateUnlockRequest = async () => {
+    if (!user) return;
+    if (!lateLockState || lateLockState.state !== 'locked') return;
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'LATE_UNLOCK_REQUEST', agent: user.name, timestamp: Date.now(),
+        device: JSON.stringify({
+          shift: user.shift, scheduledStart: lateLockState.sched,
+          lateBy: lateLockState.lateBy, platform: user.platform,
+        }),
+      });
+      showToast('Unlock request sent to manager');
+      fetch_().catch(console.error);
+    } catch (_) { showToast('Failed to send request', 'err'); }
+    setBusy(false);
+  };
+
+  // Manager: grant late unlock for an agent. Scoped to today only.
+  const doLateUnlockGrant = async (agentName) => {
+    if (!user || user.role !== ROLE_MANAGER) return;
+    setBusy(true);
+    try {
+      await post({
+        date: phNowDate(), time: phNowTime(),
+        action: 'LATE_UNLOCK', agent: agentName, timestamp: Date.now(),
+        device: JSON.stringify({ grantedBy: user.name, scopedToDate: phNowDate() }),
+      });
+      showToast(`Unlocked clock-in for ${agentName}`);
+      await fetch_();
+    } catch (_) { showToast('Grant failed', 'err'); }
+    setBusy(false);
+  };
+
   // ── SWAP — PARTNER (exchange day-offs with another agent) ──
   // Records the full exchange context so the manager UI can show what's
-  // changing and so weekly cap accounting works without re-reading state.
+  // changing and so monthly cap accounting works without re-reading state.
   const doSwapRequest = async () => {
     if (!swapTarget) return showToast('Select a target agent', 'err');
     if (!myDayOffSet) return showToast('Set your day off before requesting a swap', 'err');
-    if (myWeeklyLocked) return showToast('You already used your weekly swap', 'err');
-    if (usedWeeklySlot.has(swapTarget)) return showToast(`${swapTarget} already used their weekly swap`, 'err');
+    if (myMonthlyLocked) return showToast('You already used your monthly swap', 'err');
+    if (usedMonthlySlot.has(swapTarget)) return showToast(`${swapTarget} already used their monthly swap`, 'err');
     const partner = agents.find(a => a.name === swapTarget);
     if (!partner) return showToast('Partner not found', 'err');
     const myOff      = Number(dayOffs[user.name]);
@@ -898,7 +1049,8 @@ function AppInner() {
         toDayOff: partnerOff,
         platform: user.platform,
         note: swapNote,
-        weekStart: currentWeekKey(),
+        periodKey: currentPeriodKey(),
+        weekStart: currentPeriodKey(), // legacy alias, server keeps reading both
         status: 'pending',
       }),
     });
@@ -910,7 +1062,7 @@ function AppInner() {
   // ── SWAP — SOLO (move only my own day-off, no partner) ──
   const doSoloSwapRequest = async () => {
     if (!myDayOffSet) return showToast('Set your day off first', 'err');
-    if (myWeeklyLocked) return showToast('You already used your weekly swap', 'err');
+    if (myMonthlyLocked) return showToast('You already used your monthly swap', 'err');
     if (soloTargetDay === null || soloTargetDay === undefined) return showToast('Pick a new day off', 'err');
     const myOff = Number(dayOffs[user.name]);
     if (Number(soloTargetDay) === myOff) return showToast('That is already your day off', 'err');
@@ -927,7 +1079,8 @@ function AppInner() {
         targetDayOff: Number(soloTargetDay),
         platform: user.platform,
         note: swapNote,
-        weekStart: currentWeekKey(),
+        periodKey: currentPeriodKey(),
+        weekStart: currentPeriodKey(),
         status: 'pending',
       }),
     });
@@ -948,22 +1101,22 @@ function AppInner() {
     setBusy(true);
 
     // Race-condition recheck: if approving, make sure neither party has
-    // already used their weekly slot via another approval that landed first.
+    // already used their monthly slot via another approval that landed first.
     if (decision === 'approve') {
-      if (usedWeeklySlot.has(req.from)) {
-        showToast(`${req.from} already used their weekly swap`, 'err');
+      if (usedMonthlySlot.has(req.from)) {
+        showToast(`${req.from} already used their monthly swap`, 'err');
         setBusy(false);
         return;
       }
-      if (req.swapType !== 'solo' && req.to && usedWeeklySlot.has(req.to)) {
-        showToast(`${req.to} already used their weekly swap`, 'err');
+      if (req.swapType !== 'solo' && req.to && usedMonthlySlot.has(req.to)) {
+        showToast(`${req.to} already used their monthly swap`, 'err');
         setBusy(false);
         return;
       }
     }
 
     const decTs = Date.now();
-    const reqWeek = req.weekStart || weekStartKey(req.timestamp || decTs);
+    const reqPeriod = req.periodKey || req.weekStart || monthStartKey(req.timestamp || decTs);
 
     await post({
       date: phNowDate(), time: phNowTime(),
@@ -980,45 +1133,50 @@ function AppInner() {
         targetDayOff: req.targetDayOff,
         platform: req.platform,
         note: req.note,
-        weekStart: reqWeek,
+        periodKey: reqPeriod,
+        weekStart: reqPeriod,
         reqTimestamp: req.timestamp,
         status: decision === 'approve' ? 'approved' : 'denied',
         decidedBy: user.name,
       }),
     });
 
-    // Auto-deny any other PENDING request this week that involves the same
+    // Auto-deny any other PENDING request this period that involves the same
     // agents — they're now ineligible because the slot is consumed.
     if (decision === 'approve') {
       const conflictParties = new Set([req.from]);
       if (req.swapType !== 'solo' && req.to) conflictParties.add(req.to);
       const conflicts = pendingSwaps.filter(p => {
         if (swapKey(p) === swapKey(req)) return false; // not the one we just approved
-        const pWeek = p.weekStart || weekStartKey(p.timestamp || 0);
-        if (pWeek !== reqWeek) return false;
+        const pPeriod = p.periodKey || p.weekStart || monthStartKey(p.timestamp || 0);
+        if (pPeriod !== reqPeriod) return false;
         const involves = (p.from && conflictParties.has(p.from)) || (p.to && conflictParties.has(p.to));
         return involves;
       });
       // Fire conflict denials in parallel — these are best-effort
-      await Promise.all(conflicts.map(c => post({
-        date: phNowDate(), time: phNowTime(),
-        action: 'SWAP_DENY',
-        agent: user.name, timestamp: Date.now(),
-        device: JSON.stringify({
-          swapType: c.swapType || 'partner',
-          from: c.from, to: c.to,
-          fromShift: c.fromShift, toShift: c.toShift,
-          fromDayOff: c.fromDayOff, toDayOff: c.toDayOff,
-          targetDayOff: c.targetDayOff,
-          platform: c.platform, note: c.note,
-          weekStart: c.weekStart || pWeek,
-          reqTimestamp: c.timestamp,
-          status: 'denied',
-          decidedBy: user.name,
-          autoDenied: true,
-          autoDenyReason: 'Weekly slot consumed by a different approval',
-        }),
-      }).catch(() => {})));
+      await Promise.all(conflicts.map(c => {
+        const cPeriod = c.periodKey || c.weekStart || monthStartKey(c.timestamp || 0);
+        return post({
+          date: phNowDate(), time: phNowTime(),
+          action: 'SWAP_DENY',
+          agent: user.name, timestamp: Date.now(),
+          device: JSON.stringify({
+            swapType: c.swapType || 'partner',
+            from: c.from, to: c.to,
+            fromShift: c.fromShift, toShift: c.toShift,
+            fromDayOff: c.fromDayOff, toDayOff: c.toDayOff,
+            targetDayOff: c.targetDayOff,
+            platform: c.platform, note: c.note,
+            periodKey: cPeriod,
+            weekStart: cPeriod,
+            reqTimestamp: c.timestamp,
+            status: 'denied',
+            decidedBy: user.name,
+            autoDenied: true,
+            autoDenyReason: 'Monthly slot consumed by a different approval',
+          }),
+        }).catch(() => {});
+      }));
     }
 
     showToast(decision === 'approve' ? 'Swap approved!' : 'Swap denied.');
@@ -1051,9 +1209,9 @@ function AppInner() {
   const doEscalate = async () => {
     if (!escalTitle.trim()) return showToast('Add a title', 'err');
     setBusy(true);
-    await post({ date: phNowDate(), time: phNowTime(), action: 'ESCALATE', agent: user.name, timestamp: Date.now(), device: JSON.stringify({ title: escalTitle, detail: escalDetail, urgent: escalUrgent, agent: user.name, resolved: false }) });
+    await post({ date: phNowDate(), time: phNowTime(), action: 'ESCALATE', agent: user.name, timestamp: Date.now(), device: JSON.stringify({ title: escalTitle, detail: escalDetail, urgent: escalUrgent, agent: user.name, target: escalTarget || 'manager', resolved: false }) });
     showToast(escalUrgent ? '🚨 Urgent escalation sent!' : 'Escalation submitted.');
-    setEscalModal(false); setEscalTitle(''); setEscalDetail(''); setEscalUrgent(false);
+    setEscalModal(false); setEscalTitle(''); setEscalDetail(''); setEscalUrgent(false); setEscalTarget('manager');
     await fetch_(); setBusy(false);
   };
 
@@ -1090,7 +1248,7 @@ function AppInner() {
   // resolve to the same key as the request. Fallback to `timestamp` for raw requests.
   const swapKey = s => `${s.from||''}|${s.to||''}|${s.platform||''}|${s.reqTimestamp || s.timestamp || ''}`;
 
-  // ── WEEKLY DAY-OFF SWAP STATE ─────────────────────────────────────────
+  // ── MONTHLY DAY-OFF SWAP STATE ─────────────────────────────────────────
   // Declared here (before isOnDayOff) so the useCallback below can read
   // `effectiveDayOffs` without hitting the const-declaration TDZ.
   const _latestSwapByKey = useMemo(() => {
@@ -1107,30 +1265,35 @@ function AppInner() {
     return map;
   }, [swapReqs]); // eslint-disable-line
 
-  // All swaps that landed in the current PH week, deduped to one record per key.
-  const swapsThisWeek = useMemo(() => {
-    const wk = currentWeekKey();
-    return Object.values(_latestSwapByKey).filter(s => (s.weekStart || weekStartKey(s.reqTimestamp || s.timestamp || 0)) === wk);
+  // All swaps that landed in the current PH calendar month, deduped to one
+  // record per key. Period is always derived from the row's reqTimestamp/
+  // timestamp — the stored periodKey/weekStart fields are hints only.
+  const swapsThisPeriod = useMemo(() => {
+    const wk = currentPeriodKey();
+    return Object.values(_latestSwapByKey).filter(s => {
+      const ts = s.reqTimestamp || s.timestamp || 0;
+      return monthStartKey(ts) === wk;
+    });
   }, [_latestSwapByKey]);
 
-  // Set of agent names who already used their one weekly swap slot
-  // (one APPROVED swap per agent per week, partner OR solo counts).
-  const usedWeeklySlot = useMemo(() => {
+  // Set of agent names who already used their one monthly swap slot
+  // (one APPROVED swap per agent per month, partner OR solo counts).
+  const usedMonthlySlot = useMemo(() => {
     const used = new Set();
-    swapsThisWeek.forEach(s => {
+    swapsThisPeriod.forEach(s => {
       const approved = s.action === 'SWAP_APPROVE' || s.status === 'approved';
       if (!approved) return;
       if (s.from) used.add(s.from);
       if (s.swapType !== 'solo' && s.to) used.add(s.to);
     });
     return used;
-  }, [swapsThisWeek]);
+  }, [swapsThisPeriod]);
 
-  // Effective day-off per agent for THIS week: defaults to dayOffs[name],
-  // but the latest approved swap this week may have moved it.
+  // Effective day-off per agent for THIS month: defaults to dayOffs[name],
+  // but the latest approved swap this month may have moved it.
   const effectiveDayOffs = useMemo(() => {
     const eff = { ...dayOffs };
-    const approved = swapsThisWeek
+    const approved = swapsThisPeriod
       .filter(s => s.action === 'SWAP_APPROVE' || s.status === 'approved')
       .sort((a,b) => (Number(a.timestamp)||0) - (Number(b.timestamp)||0));
     approved.forEach(s => {
@@ -1142,11 +1305,15 @@ function AppInner() {
       }
     });
     return eff;
-  }, [dayOffs, swapsThisWeek]);
+  }, [dayOffs, swapsThisPeriod]);
 
   // Convenience flags for the logged-in user
-  const myDayOffSet     = user && (dayOffs[user.name] !== undefined && dayOffs[user.name] !== null);
-  const myWeeklyLocked  = user && usedWeeklySlot.has(user.name);
+  const myDayOffSet      = user && (dayOffs[user.name] !== undefined && dayOffs[user.name] !== null);
+  const myMonthlyLocked  = user && usedMonthlySlot.has(user.name);
+  // Legacy aliases — used by older code paths still in flight
+  const swapsThisWeek    = swapsThisPeriod;
+  const usedWeeklySlot   = usedMonthlySlot;
+  const myWeeklyLocked   = myMonthlyLocked;
 
   // Helper: is a given agent on day off RIGHT NOW (PH time)?
   // Reads from `effectiveDayOffs` so an approved swap this week takes effect
@@ -1455,6 +1622,107 @@ function AppInner() {
     });
   }, [attend, kpiData, kpiAgentMatch]);
 
+  // ── LATE LOCKOUT STATE ────────────────────────────────────────────────
+  // Computes the agent's lateness window for today's scheduled shift.
+  // Returns: null (not late, or already clocked in), 'early' (before window),
+  // 'grace' (within 5 min grace), 'late' (5–30 min late), 'locked' (30+ min,
+  // needs manager unlock), or 'unlocked' (locked, but a manager granted access).
+  const lateLockState = useMemo(() => {
+    if (!user || user.role !== ROLE_AGENT) return null;
+    if (rec.clockIn && !rec.clockedOut) return null; // already clocked in
+    const sched = schedStart(user.shift || 'Morning', now);
+    const earliest = sched - CLOCK_IN_EARLY;
+    if (now < earliest) return { state: 'early', sched, earliest, msUntil: earliest - now };
+    const lateBy = now - sched;
+    if (lateBy <= LATE_GRACE) return { state: 'grace', sched, lateBy };
+    if (lateBy < LATE_LOCK_THRESHOLD) return { state: 'late', sched, lateBy };
+    // 30+ min late — check for manager unlock today
+    const td = todayMs();
+    const granted = lateGrants.find(g => g.agent === user.name && Number(g.timestamp) >= td);
+    if (granted) return { state: 'unlocked', sched, lateBy, grantedBy: granted.grantedBy || granted.decidedBy };
+    // Has the agent already requested? (so we can show "Pending" instead of "Request")
+    const requested = lateReqs.find(r => r.agent === user.name && Number(r.timestamp) >= td);
+    return { state: 'locked', sched, lateBy, requested: !!requested };
+  }, [user, rec.clockIn, rec.clockedOut, now, lateGrants, lateReqs]);
+
+  // ── HELPWAVE QUOTA INFO ───────────────────────────────────────────────
+  // Returns { tickets, target, pct, met, isHelpwave, isSenior } for the
+  // current user. Non-Helpwave agents get ticket count but no target.
+  const quotaInfo = useMemo(() => {
+    if (!user || user.role !== ROLE_AGENT) return null;
+    const platformKey = String(user.platform || '').toLowerCase();
+    const tickets = kpiData ? kpiAgentMatch(user, platformKey) : null;
+    const target = quotaForAgent(user);
+    const isHw = String(user.platform || '').toLowerCase() === 'helpwave';
+    const senior = isSenior(user.position);
+    if (tickets === null || target === null) {
+      return { tickets, target, pct: 0, met: false, isHelpwave: isHw, isSenior: senior, unknown: true };
+    }
+    const pct = target > 0 ? Math.min(100, Math.round((tickets / target) * 100)) : 0;
+    return { tickets, target, pct, met: tickets >= target, isHelpwave: isHw, isSenior: senior, unknown: false };
+  }, [user, kpiData, kpiAgentMatch]);
+
+  // ── CONSECUTIVE LATE DAYS ─────────────────────────────────────────────
+  // Walks back day by day from yesterday looking for consecutive days where
+  // the agent's first clock-in was past the grace window. Returns count.
+  // (Today is excluded — it's still in progress.)
+  const consecutiveLateDays = useMemo(() => {
+    if (!user || user.role !== ROLE_AGENT) return 0;
+    let count = 0;
+    for (let i = 1; i <= 14; i++) {
+      const dayStart = todayMs() - i * 86_400_000;
+      const dayEnd = dayStart + 86_400_000;
+      const dayLogs = logs.filter(l => l.agent === user.name && l.timestamp >= dayStart && l.timestamp < dayEnd && l.action === 'clockIn');
+      if (!dayLogs.length) break; // gap (day off / absent) — break the streak
+      const ci = Math.min(...dayLogs.map(l => l.timestamp));
+      const sched = schedStart(user.shift || 'Morning', ci);
+      const lateBy = ci - sched;
+      if (lateBy > LATE_GRACE) count++; else break;
+    }
+    return count;
+  }, [user, logs]);
+
+  // ── PAUSE LIMIT ───────────────────────────────────────────────────────
+  // True when cumulative pause for this shift has hit/exceeded the 2h cap.
+  const pauseAtMax = useMemo(() => {
+    return pauseMs >= PAUSE_MAX;
+  }, [pauseMs]);
+
+  // ── SHIFT WINDOW EXCEEDED ─────────────────────────────────────────────
+  // True when current time is past scheduled-end + 2h grace.
+  const shiftWindowExceeded = useMemo(() => {
+    if (!user || !rec.clockIn || rec.clockedOut) return false;
+    const sched = schedStart(user.shift || 'Morning', rec.clockIn);
+    const windowEnd = sched + SHIFT_GOAL + SHIFT_GRACE;
+    return now > windowEnd;
+  }, [user, rec.clockIn, rec.clockedOut, now]);
+
+  // Pending late-unlock requests that managers haven't granted yet.
+  // Only shows requests from today (older ones are stale).
+  const pendingLateReqs = useMemo(() => {
+    const td = todayMs();
+    const recent = lateReqs.filter(r => Number(r.timestamp) >= td);
+    // Filter out ones that already have a grant today
+    return recent.filter(r => !lateGrants.some(g => g.agent === r.agent && Number(g.timestamp) >= td));
+  }, [lateReqs, lateGrants]);
+
+  // Today's quota shortfalls (Helpwave clock-outs below target)
+  const todayShortfalls = useMemo(() => {
+    const td = todayMs();
+    return quotaShortfalls.filter(s => Number(s.timestamp) >= td);
+  }, [quotaShortfalls]);
+
+  // Auto-resume duty when pause exceeds 2 hours.
+  // The setInterval `now` tick re-evaluates this every second.
+  useEffect(() => {
+    if (!user || user.role !== ROLE_AGENT) return;
+    if (!rec.onPause) return;
+    if (pauseMs >= PAUSE_MAX) {
+      doAction('dutyResume');
+      showToast('Pause limit reached — duty auto-resumed', 'warn');
+    }
+  }, [pauseMs, rec.onPause, user]); // eslint-disable-line
+
   // ── SWAP ELIGIBILITY ──
   // For a PARTNER day-off swap, the candidate must be:
   //   - active agent (not me)
@@ -1506,6 +1774,26 @@ function AppInner() {
   }, [swapReqs, user]);
   const escKey = e => `${e.agent}|${e.date}|${e.time}|${String(e.title||'').slice(0,20)}`;
   const openEscals    = useMemo(() => escals.filter(e => !e.resolved), [escals]);
+
+  // Escalations visible to ME based on role + routing target.
+  // - Managers see everything (no filter).
+  // - Senior agents (Senior Agent / Team Lead / Quality Analyst) see escalations
+  //   targeted to 'senior'.
+  // - Chargeback Analysts see escalations targeted to 'chargeback'.
+  // - Regular agents see only the escalations they themselves filed (already
+  //   handled in their existing "My Escalations" panel, not via this list).
+  const escalsForMe = useMemo(() => {
+    if (!user) return [];
+    if (user.role === ROLE_MANAGER || user.role === ROLE_FINANCE) return openEscals;
+    const isSeniorUser = isSenior(user.position);
+    const isChargebackUser = String(user.position || '').toLowerCase().includes('chargeback');
+    return openEscals.filter(e => {
+      const target = String(e.target || 'manager').toLowerCase();
+      if (isSeniorUser && target === 'senior') return true;
+      if (isChargebackUser && target === 'chargeback') return true;
+      return false;
+    });
+  }, [openEscals, user]);
   // For each escalation, get the list of managers who acknowledged it
   const escAckMap = useMemo(() => {
     const map = {};
@@ -1676,7 +1964,7 @@ function AppInner() {
                       {effectiveDayOffs[user.name] !== undefined && dayOffs[user.name] !== undefined &&
                         Number(effectiveDayOffs[user.name]) !== Number(dayOffs[user.name]) && (
                         <span style={{ color: 'var(--purple)', marginLeft: 6, fontWeight: 700 }}>
-                          · ↺ Swapped to {DAY_NAMES[effectiveDayOffs[user.name]]} this week
+                          · ↺ Swapped to {DAY_NAMES[effectiveDayOffs[user.name]]} this month
                         </span>
                       )}
                     </div>
@@ -1687,6 +1975,34 @@ function AppInner() {
                   <Chip color={agentSt.color}><Dot color={agentSt.color} pulse={agentSt.pulse} /> {agentSt.label}</Chip>
                 </div>
               </div>
+
+              {/* QUOTA METER — Helpwave shows target + progress, others show ticket count */}
+              {quotaInfo && rec.clockIn && !rec.clockedOut && (
+                <div style={{ padding: '14px 16px', borderRadius: 14, background: quotaInfo.met ? 'rgba(34,211,165,0.07)' : quotaInfo.unknown ? 'rgba(100,116,139,0.06)' : 'rgba(245,158,11,0.07)', border: `1px solid ${quotaInfo.met ? 'rgba(34,211,165,0.25)' : quotaInfo.unknown ? 'rgba(100,116,139,0.2)' : 'rgba(245,158,11,0.25)'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: quotaInfo.isHelpwave && !quotaInfo.unknown ? 10 : 0 }}>
+                    <div>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700, color: quotaInfo.met ? 'var(--teal)' : quotaInfo.unknown ? 'var(--sub)' : 'var(--amber)', letterSpacing: 1 }}>
+                        📊 TICKETS TODAY{quotaInfo.isHelpwave ? (quotaInfo.isSenior ? ' · SENIOR (target 80)' : ' · JUNIOR (target 60)') : ''}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>
+                        {quotaInfo.unknown ? 'KPI data not available — name may not match dashboard' : `${quotaInfo.tickets} answered${quotaInfo.isHelpwave ? ` of ${quotaInfo.target} target` : ''}`}
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: 22, fontWeight: 700, color: quotaInfo.met ? 'var(--teal)' : quotaInfo.unknown ? 'var(--sub)' : 'var(--amber)' }}>
+                      {quotaInfo.unknown ? '—' : quotaInfo.tickets}
+                      {quotaInfo.isHelpwave && !quotaInfo.unknown && <span style={{ fontSize: 12, color: 'var(--sub)' }}> / {quotaInfo.target}</span>}
+                    </div>
+                  </div>
+                  {quotaInfo.isHelpwave && !quotaInfo.unknown && (
+                    <>
+                      <div className="pbar"><div className="pfill" style={{ width: `${quotaInfo.pct}%`, background: quotaInfo.met ? 'linear-gradient(90deg,var(--blue),var(--teal))' : 'var(--amber)' }} /></div>
+                      <div style={{ marginTop: 6, fontSize: 10, color: quotaInfo.met ? 'var(--teal)' : 'var(--amber)', fontFamily: 'var(--mono)', fontWeight: 700 }}>
+                        {quotaInfo.met ? '✓ QUOTA REACHED' : `${quotaInfo.target - quotaInfo.tickets} more to reach quota`}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* DAY OFF BLOCK — replaces session card when on day off and not already clocked in */}
               {isOnDayOff(user.name) && !rec.clockIn && (
@@ -1788,27 +2104,56 @@ function AppInner() {
                       <div className="pbar"><div className="pfill" style={{ width: `${bPct}%`, background: bOvr ? 'var(--red)' : 'var(--amber)' }} /></div>
                     </div>
                     {pauseMs > 0 && <div style={{ marginBottom: 14 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--mono)', color: 'var(--sub)', marginBottom: 5 }}>
-                        <span>DUTY PAUSED</span><span>{fmtS(pauseMs)}</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--mono)', color: pauseAtMax ? 'var(--red)' : 'var(--sub)', marginBottom: 5 }}>
+                        <span>DUTY PAUSED</span><span style={{ color: pauseAtMax ? 'var(--red)' : 'var(--orange)' }}>{fmt(pauseMs)} / 2h</span>
                       </div>
-                      <div className="pbar"><div className="pfill" style={{ width: '100%', background: 'var(--orange)' }} /></div>
+                      <div className="pbar"><div className="pfill" style={{ width: `${Math.min(100, (pauseMs / PAUSE_MAX) * 100)}%`, background: pauseAtMax ? 'var(--red)' : 'var(--orange)' }} /></div>
                     </div>}
                   </>}
 
                   {bOvr && <div className="alert aer" style={{ marginBottom: 10 }}>⚠ Break exceeded by {fmtS(bMs - BREAK_MAX)}</div>}
+                  {pauseAtMax && rec.onPause && <div className="alert aer" style={{ marginBottom: 10 }}>⚠ 2h pause limit reached — duty will auto-resume</div>}
+                  {shiftWindowExceeded && <div className="alert aer" style={{ marginBottom: 10 }}>⚠ Shift window exceeded (8h + 2h grace) — please clock out</div>}
                   {sPct >= 100 && !rec.clockedOut && <div className="alert aok" style={{ marginBottom: 10 }}>✓ 8h target reached! {ot > 0 ? `+${fmtS(ot)} OT` : ''}</div>}
+
+                  {/* Late-lockout banner (30+ min late) */}
+                  {lateLockState && lateLockState.state === 'locked' && (
+                    <div className="alert aer" style={{ marginBottom: 12, flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
+                      <div>🔒 <strong>System locked</strong> — you're {fmtS(lateLockState.lateBy)} late (over 30 min). Manager approval required to clock in.</div>
+                      {lateLockState.requested
+                        ? <Chip color="var(--amber)">⏳ Unlock requested — waiting for manager</Chip>
+                        : <button className="btn br" style={{ fontSize: 11, minHeight: 34, padding: '6px 14px' }} onClick={doLateUnlockRequest}>📨 REQUEST UNLOCK</button>}
+                    </div>
+                  )}
+                  {lateLockState && lateLockState.state === 'unlocked' && !rec.clockIn && (
+                    <div className="alert aok" style={{ marginBottom: 10 }}>✓ Clock-in unlocked by {lateLockState.grantedBy || 'manager'} — proceed when ready</div>
+                  )}
+                  {lateLockState && lateLockState.state === 'late' && !rec.clockIn && (
+                    <div className="alert awn" style={{ marginBottom: 10 }}>⚠ You're {fmtS(lateLockState.lateBy)} late. System will lock at 30 min.</div>
+                  )}
+                  {lateLockState && lateLockState.state === 'early' && !rec.clockIn && (
+                    <div className="alert awn" style={{ marginBottom: 10 }}>🕘 Clock-in opens at {phTimeShort(lateLockState.earliest)} (10 min before shift)</div>
+                  )}
+                  {consecutiveLateDays >= 2 && (
+                    <div className="alert aer" style={{ marginBottom: 10 }}>⚠ You've been late {consecutiveLateDays} day{consecutiveLateDays !== 1 ? 's' : ''} in a row. Managers can see this.</div>
+                  )}
 
                   {/* Action buttons */}
                   <div className="actg">
-                    <button className="btn bt" disabled={busy || isOnDayOff(user.name) || !(!rec.clockIn || rec.clockedOut)} onClick={() => doAction('clockIn')}>
-                      {busy && !rec.clockIn ? '⏳ LOADING...' : isOnDayOff(user.name) && !rec.clockIn ? '🏖 DAY OFF' : '▶ CLOCK IN'}
+                    <button className="btn bt" disabled={busy || isOnDayOff(user.name) || (lateLockState && (lateLockState.state === 'early' || lateLockState.state === 'locked')) || !(!rec.clockIn || rec.clockedOut)} onClick={() => doAction('clockIn')}>
+                      {busy && !rec.clockIn ? '⏳ LOADING...'
+                        : isOnDayOff(user.name) && !rec.clockIn ? '🏖 DAY OFF'
+                        : lateLockState && lateLockState.state === 'early' ? '🕘 TOO EARLY'
+                        : lateLockState && lateLockState.state === 'locked' ? '🔒 LOCKED'
+                        : '▶ CLOCK IN'}
                     </button>
                     <button className="btn br" disabled={!(rec.clockIn && !rec.onBreak && !rec.onPause && !rec.clockedOut)} onClick={() => doAction('clockOut')}>■ CLOCK OUT</button>
                     <button className="btn ba s2" disabled={!(rec.clockIn && !rec.onPause && !rec.clockedOut)} onClick={() => doAction(rec.onBreak ? 'breakEnd' : 'breakStart')}>
                       {rec.onBreak ? '▶ RESUME WORK' : '⏸ START BREAK'}
                     </button>
-                    <button className={`btn s3 ${rec.onPause ? 'bt' : 'bo'}`} disabled={!(rec.clockIn && !rec.onBreak && !rec.clockedOut)} onClick={() => doAction(rec.onPause ? 'dutyResume' : 'dutyPause')}>
-                      {rec.onPause ? '▶ RESUME DUTY' : '⚠ PAUSE DUTY'}
+                    <button className={`btn s3 ${rec.onPause ? 'bt' : 'bo'}`} disabled={!(rec.clockIn && !rec.onBreak && !rec.clockedOut) || (!rec.onPause && pauseAtMax)} onClick={() => doAction(rec.onPause ? 'dutyResume' : 'dutyPause')}
+                      title={!rec.onPause && pauseAtMax ? '2h pause limit reached for this shift' : ''}>
+                      {rec.onPause ? '▶ RESUME DUTY' : pauseAtMax ? '⚠ PAUSE LIMIT REACHED' : '⚠ PAUSE DUTY'}
                     </button>
                   </div>
 
@@ -1836,11 +2181,11 @@ function AppInner() {
                 })()}
                 <div className="g2sm">
                     <button className="btn bb" style={{ fontSize: 11 }} disabled={!myDayOffSet || myWeeklyLocked} onClick={() => setSwapModal(true)}
-                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your weekly swap' : ''}>
+                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your monthly swap' : ''}>
                       ⇄ SWAP DAY OFF{myWeeklyLocked ? ' (LOCKED)' : ''}
                     </button>
                     <button className="btn bp" style={{ fontSize: 11 }} disabled={!myDayOffSet || myWeeklyLocked} onClick={() => setSoloModal(true)}
-                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your weekly swap' : ''}>
+                      title={!myDayOffSet ? 'Set your day off first' : myWeeklyLocked ? 'Already used your monthly swap' : ''}>
                       ↺ MOVE MY OFF
                     </button>
                     <button className="btn br" style={{ fontSize: 11 }} onClick={() => setEscalModal(true)}>🚨 ESCALATE</button>
@@ -1873,7 +2218,7 @@ function AppInner() {
                                 }
                               </div>
                               {s.note && <div style={{ fontSize: 11, color: 'var(--sub)', marginTop: 2, fontStyle: 'italic' }}>"{s.note}"</div>}
-                              {s.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>by {s.decidedBy}{s.weekStart ? ` · week of ${s.weekStart}` : ''}</div>}
+                              {s.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 2, fontFamily: 'var(--mono)' }}>by {s.decidedBy}{s.weekStart ? ` · ${s.periodKey || s.weekStart || ''}` : ''}</div>}
                               {s.autoDenied && s.autoDenyReason && <div style={{ fontSize: 10, color: 'var(--amber)', marginTop: 2, fontFamily: 'var(--mono)' }}>↳ {s.autoDenyReason}</div>}
                             </div>
                             <Chip color={approved ? 'var(--teal)' : 'var(--red)'}>
@@ -1884,6 +2229,36 @@ function AppInner() {
                       );
                     })}
                   </Glass>}
+
+                  {/* Routed-to-me escalations (visible to seniors and chargeback analysts) */}
+                  {escalsForMe.length > 0 && (
+                    <Glass style={{ padding: 16 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                        <span style={{ fontSize: 14 }}>📨</span>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>Escalations Routed to You</div>
+                        <Chip color="var(--amber)" small>{escalsForMe.length}</Chip>
+                      </div>
+                      {escalsForMe.slice(0, 5).map((e, i) => {
+                        const key = escKey(e);
+                        const ackedBy = escAckMap[key] || [];
+                        const myAck = ackedBy.includes(user?.name);
+                        return (
+                          <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 6 }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontWeight: 700, fontSize: 12 }}>{e.urgent ? '🚨 ' : ''}{e.title}</div>
+                                <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 2 }}>from {e.agent} · {e.date} {e.time}</div>
+                                {e.detail && <div style={{ fontSize: 12, marginTop: 5, lineHeight: 1.5 }}>{e.detail}</div>}
+                              </div>
+                              {myAck
+                                ? <Chip color="var(--teal)" small>✓ ACKED</Chip>
+                                : <button className="btn bt" style={{ fontSize: 10, minHeight: 30, padding: '5px 12px' }} onClick={() => doAckEscalation(e)}>✓ ACK</button>}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </Glass>
+                  )}
 
                   {/* My Escalations — status feedback for agents */}
                   {(() => {
@@ -2066,6 +2441,85 @@ function AppInner() {
             {/* ATTENDANCE */}
             {tab === 'attendance' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+                {/* PENDING LATE-UNLOCK REQUESTS — top of dashboard so it's hard to miss */}
+                {pendingLateReqs.length > 0 && (
+                  <Glass glow="rgba(244,63,94,0.18)" style={{ borderColor: 'rgba(244,63,94,0.3)' }}>
+                    <SectionHead>
+                      🔒 Late Unlock Requests
+                      <Chip color="var(--red)">{pendingLateReqs.length} PENDING</Chip>
+                    </SectionHead>
+                    {pendingLateReqs.map((r, i) => (
+                      <div key={i} style={{ padding: '12px 14px', borderRadius: 12, marginBottom: 8, background: 'rgba(244,63,94,.05)', border: '1px solid rgba(244,63,94,.18)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 14 }}><span style={{ color: 'var(--red)' }}>{r.agent}</span> requests clock-in unlock</div>
+                            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>
+                              {r.platform} · {r.shift || '?'} shift · {fmtS(Number(r.lateBy) || 0)} late · {r.date} {r.time}
+                            </div>
+                          </div>
+                          <button className="btn bt" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }} onClick={() => doLateUnlockGrant(r.agent)}>✓ GRANT UNLOCK</button>
+                        </div>
+                      </div>
+                    ))}
+                  </Glass>
+                )}
+
+                {/* TODAY'S QUOTA SHORTFALLS — Helpwave clock-outs below target */}
+                {todayShortfalls.length > 0 && (
+                  <Glass style={{ borderColor: 'rgba(245,158,11,0.3)' }}>
+                    <SectionHead>
+                      📉 Below-Quota Clock-Outs (Today)
+                      <Chip color="var(--amber)">{todayShortfalls.length}</Chip>
+                    </SectionHead>
+                    {todayShortfalls.map((s, i) => (
+                      <div key={i} style={{ padding: '10px 14px', borderRadius: 12, marginBottom: 6, background: 'rgba(245,158,11,.05)', border: '1px solid rgba(245,158,11,.15)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>{s.agent} <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginLeft: 6 }}>{s.isSenior ? 'SENIOR' : 'JUNIOR'} · {s.platform}</span></div>
+                            <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 2 }}>{s.tickets} of {s.target} tickets — short by <strong style={{ color: 'var(--amber)' }}>{s.shortfall}</strong> · {s.time}</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </Glass>
+                )}
+
+                {/* CONSECUTIVE LATE AGENTS — flag agents who've been late multiple days */}
+                {(() => {
+                  const flagged = attend.filter(a => {
+                    let count = 0;
+                    for (let i = 1; i <= 7; i++) {
+                      const dayStart = todayMs() - i * 86_400_000;
+                      const dayEnd = dayStart + 86_400_000;
+                      const dayLogs = logs.filter(l => l.agent === a.name && l.timestamp >= dayStart && l.timestamp < dayEnd && l.action === 'clockIn');
+                      if (!dayLogs.length) break;
+                      const ci = Math.min(...dayLogs.map(l => l.timestamp));
+                      const sched = schedStart(a.shift || 'Morning', ci);
+                      if (ci - sched > LATE_GRACE) count++; else break;
+                    }
+                    return count >= 2 ? { agent: a, count } : null;
+                  }).filter(Boolean);
+                  if (!flagged.length) return null;
+                  return (
+                    <Glass style={{ borderColor: 'rgba(245,158,11,0.25)' }}>
+                      <SectionHead>
+                        ⚠ Consecutive Lateness Flag
+                        <Chip color="var(--amber)">{flagged.length}</Chip>
+                      </SectionHead>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                        {flagged.map((f, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 11px', background: 'rgba(245,158,11,.08)', borderRadius: 20, border: '1px solid rgba(245,158,11,.25)' }}>
+                            <Dot color="var(--amber)" />
+                            <span style={{ fontSize: 12, fontWeight: 700 }}>{f.agent.name}</span>
+                            <span style={{ fontSize: 10, color: 'var(--amber)', fontFamily: 'var(--mono)' }}>{f.count}d in a row</span>
+                          </div>
+                        ))}
+                      </div>
+                    </Glass>
+                  );
+                })()}
+
                 <div className="g4">
                   {[
                     { l: 'ON SHIFT',     v: attend.filter(a => a.status === ST.ACTIVE).length,  c: 'var(--teal)', g: 'rgba(34,211,165,.1)' },
@@ -2209,7 +2663,7 @@ function AppInner() {
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
                               <Chip color={isSolo ? 'var(--purple)' : 'var(--blue)'} small>{isSolo ? '↺ SOLO' : '⇄ PARTNER'}</Chip>
-                              <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>week of {s.weekStart || '?'}</span>
+                              <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{s.periodKey || s.weekStart || '?'}</span>
                             </div>
                             <div style={{ fontWeight: 700, fontSize: 14 }}>
                               {isSolo
@@ -2359,7 +2813,7 @@ function AppInner() {
                             : offAgents.map(a => {
                               const swapped = dayOffs[a.name] !== undefined && Number(dayOffs[a.name]) !== dow;
                               return (
-                                <div key={a.name} style={{ fontSize: 9, fontWeight: 700, color: swapped ? 'var(--purple)' : 'var(--amber)', fontFamily: 'var(--mono)', marginBottom: 2, lineHeight: 1.4 }} title={swapped ? `Normally off ${DAY_NAMES[dayOffs[a.name]]} — swapped this week` : ''}>
+                                <div key={a.name} style={{ fontSize: 9, fontWeight: 700, color: swapped ? 'var(--purple)' : 'var(--amber)', fontFamily: 'var(--mono)', marginBottom: 2, lineHeight: 1.4 }} title={swapped ? `Normally off ${DAY_NAMES[dayOffs[a.name]]} — swapped this month` : ''}>
                                   {swapped ? '⇄' : '🏖'} {a.name}{swapped ? ' *' : ''}
                                 </div>
                               );
@@ -2372,12 +2826,12 @@ function AppInner() {
                   <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', textAlign: 'center', marginTop: 4 }}>
                     {Object.keys(dayOffs).length} / {agents.filter(a=>a.status==='active'&&a.role===ROLE_AGENT).length} agents have day off assigned
                     {swapsThisWeek.some(s => s.action === 'SWAP_APPROVE' || s.status === 'approved') && (
-                      <span style={{ color: 'var(--purple)', marginLeft: 8 }}>· ⇄ = swapped this week</span>
+                      <span style={{ color: 'var(--purple)', marginLeft: 8 }}>· ⇄ = swapped this month</span>
                     )}
                   </div>
                 </Glass>
 
-                {/* Active Swaps — This Week */}
+                {/* Active Swaps — This Month */}
                 {(() => {
                   const active = swapsThisWeek.filter(s => s.action === 'SWAP_APPROVE' || s.status === 'approved');
                   if (active.length === 0) return null;
@@ -2723,7 +3177,7 @@ function AppInner() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="drag" />
             <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>⇄ Swap Day Off — Partner</div>
-            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>EXCHANGE DAY-OFFS WITH A TEAMMATE · MANAGER APPROVAL · ONE PER WEEK</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>EXCHANGE DAY-OFFS WITH A TEAMMATE · MANAGER APPROVAL · ONE PER MONTH</div>
             {user && (() => { const sh = resolveShift(user.shift || 'Morning'); return (
               <div className="alert aok" style={{ marginBottom: 14 }}>
                 You: <strong>{user.platform} · {sh.label}</strong> · Day off: <strong>{myDayOffSet ? DAY_NAMES[dayOffs[user.name]] : 'NOT SET'}</strong>
@@ -2732,9 +3186,9 @@ function AppInner() {
             {!myDayOffSet
               ? <div className="alert aer" style={{ marginBottom: 14 }}>You don't have a day off assigned yet. Ask your manager to set one before requesting a swap.</div>
               : myWeeklyLocked
-                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one weekly swap. The cap resets every Monday (PH).</div>
+                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one monthly swap. The cap resets on the 1st of each month (PH).</div>
                 : swapEligible.length === 0
-                  ? <div className="alert awn" style={{ marginBottom: 14 }}>No teammates in {user?.platform} on your shift have a different day off and an unused weekly slot.</div>
+                  ? <div className="alert awn" style={{ marginBottom: 14 }}>No teammates in {user?.platform} on your shift have a different day off and an unused monthly slot.</div>
                   : <>
                     <label className="lbl">SELECT PARTNER</label>
                     <select className="inp gap" value={swapTarget} onChange={e => setSwapTarget(e.target.value)}>
@@ -2777,11 +3231,11 @@ function AppInner() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="drag" />
             <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>↺ Move My Day Off — Solo</div>
-            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>SHIFT YOUR OWN DAY-OFF FOR THIS WEEK · MANAGER APPROVAL · ONE PER WEEK</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 12 }}>SHIFT YOUR OWN DAY-OFF FOR THIS MONTH · MANAGER APPROVAL · ONE PER MONTH</div>
             {!myDayOffSet
               ? <div className="alert aer" style={{ marginBottom: 14 }}>You don't have a day off assigned yet.</div>
               : myWeeklyLocked
-                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one weekly swap.</div>
+                ? <div className="alert awn" style={{ marginBottom: 14 }}>You already used your one monthly swap.</div>
                 : <>
                   <div className="alert aok" style={{ marginBottom: 14 }}>
                     Current day off: <strong>{DAY_NAMES[dayOffs[user.name]]}</strong>
@@ -2806,7 +3260,7 @@ function AppInner() {
                       <span style={{ color: 'var(--sub)' }}>{DAY_NAMES[dayOffs[user.name]]}</span>
                       <span style={{ margin: '0 8px', color: 'var(--purple)' }}>→</span>
                       <span style={{ color: 'var(--purple)', fontWeight: 700 }}>{DAY_NAMES[soloTargetDay]}</span>
-                      <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 4 }}>this week only</div>
+                      <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 4 }}>this month only</div>
                     </div>
                   )}
                   <label className="lbl">REASON (OPTIONAL)</label>
@@ -2814,6 +3268,27 @@ function AppInner() {
                   <button className="btn bp bw" disabled={busy || soloTargetDay === null || soloTargetDay === undefined} onClick={doSoloSwapRequest}>SEND REQUEST</button>
                 </>}
             <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => { setSoloModal(false); setSoloTargetDay(null); }}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Helpwave below-quota clock-out confirmation */}
+      {quotaConfirmModal && (
+        <div className="overlay" onClick={() => setQuotaConfirmModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>⚠ Quota Not Reached</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>HELPWAVE TICKET QUOTA CHECK</div>
+            <div className="alert awn" style={{ marginBottom: 14, fontSize: 13, lineHeight: 1.6 }}>
+              You're at <strong>{quotaConfirmModal.tickets} of {quotaConfirmModal.target}</strong> tickets ({quotaConfirmModal.target - quotaConfirmModal.tickets} short).
+              You have a <strong>2-hour grace period</strong> after your scheduled shift to complete your quota.
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6, marginBottom: 18 }}>
+              Are you sure you want to clock out now? If you confirm, your manager will be notified that you finished below quota.
+            </div>
+            <button className="btn bt bw" onClick={() => setQuotaConfirmModal(null)}>↺ STAY CLOCKED IN — KEEP WORKING</button>
+            <button className="btn br bw" style={{ marginTop: 10 }} onClick={doConfirmedClockOut}>■ CLOCK OUT ANYWAY</button>
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setQuotaConfirmModal(null)}>CANCEL</button>
           </div>
         </div>
       )}
@@ -2838,11 +3313,33 @@ function AppInner() {
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="drag" />
             <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Raise Escalation</div>
-            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>NOTIFY MANAGEMENT</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>NOTIFY THE RIGHT TEAM</div>
             <label className="lbl">ISSUE TITLE</label>
             <input className="inp gap" placeholder="Brief summary" value={escalTitle} onChange={e => setEscalTitle(e.target.value)} />
             <label className="lbl">DETAILS</label>
             <textarea className="inp" style={{ minHeight: 90, marginBottom: 14 }} placeholder="Describe the issue..." value={escalDetail} onChange={e => setEscalDetail(e.target.value)} />
+            <label className="lbl">ROUTE TO</label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+              {[
+                { id: 'manager',    label: '👔 MANAGER',    color: 'var(--purple)' },
+                { id: 'senior',     label: '⭐ SENIOR',     color: 'var(--amber)'  },
+                { id: 'chargeback', label: '💳 CHARGEBACK', color: 'var(--red)'    },
+              ].map(t => {
+                const on = escalTarget === t.id;
+                return (
+                  <button key={t.id} type="button" onClick={() => setEscalTarget(t.id)}
+                    style={{
+                      padding: '10px 8px', borderRadius: 12, fontSize: 11, fontWeight: 700, letterSpacing: 1,
+                      fontFamily: 'var(--mono)', cursor: 'pointer', minHeight: 44,
+                      background: on ? `${t.color}22` : 'rgba(255,255,255,.04)',
+                      color: on ? t.color : 'var(--sub)',
+                      border: `1px solid ${on ? `${t.color}55` : 'rgba(255,255,255,.08)'}`,
+                    }}>
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, cursor: 'pointer', padding: '10px 14px', borderRadius: 12, background: escalUrgent ? 'rgba(244,63,94,.1)' : 'rgba(255,255,255,.04)', border: `1px solid ${escalUrgent ? 'rgba(244,63,94,.3)' : 'rgba(255,255,255,.08)'}`, transition: 'all .2s' }} onClick={() => setEscalUrgent(v => !v)}>
               <div style={{ width: 20, height: 20, borderRadius: 6, border: `2px solid ${escalUrgent ? 'var(--red)' : 'rgba(255,255,255,.2)'}`, background: escalUrgent ? 'var(--red)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                 {escalUrgent && <span style={{ fontSize: 12, color: '#fff' }}>✓</span>}
