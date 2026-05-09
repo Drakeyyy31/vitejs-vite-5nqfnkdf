@@ -14,6 +14,7 @@ const LATE_LOCK_THRESHOLD = 30 * 60_000; // 30 min late → system locks, manage
 const SHIFT_GRACE = 2 * 3_600_000;       // 2 h grace window after scheduled shift end
 const PAUSE_MAX   = 2 * 3_600_000;       // 2 h max cumulative duty pause per shift
 const CLOCK_IN_EARLY = 10 * 60_000;      // can clock in up to 10 min before scheduled start
+const AUTO_CLOCKOUT_MAX = 12 * 3_600_000; // 12h hard cap — auto clock-out safety net (NEW v5.1)
 const WORKING_DAYS = 26;        // standard monthly working days for salary calc
 
 // Helpwave quotas (tickets per shift)
@@ -25,6 +26,87 @@ const quotaForAgent = agent => {
   if (!agent) return null;
   if (String(agent.platform || '').toLowerCase() !== 'helpwave') return null;
   return isSenior(agent.position) ? HW_QUOTA_SENIOR : HW_QUOTA_JUNIOR;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LEAVE SYSTEM (NEW v5.1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Distinct from day-off swaps. Date-range based. Manager approves.
+// Sick / Vacation / Bereavement = paid; Emergency / Personal = unpaid.
+const LEAVE_TYPES = [
+  { id: 'sick',        label: 'Sick Leave',  emoji: '🤒', color: 'var(--blue)',   paid: true,  paidLabel: 'PAID'   },
+  { id: 'vacation',    label: 'Vacation',    emoji: '🏖', color: 'var(--teal)',   paid: true,  paidLabel: 'PAID'   },
+  { id: 'bereavement', label: 'Bereavement', emoji: '🕊', color: 'var(--purple)', paid: true,  paidLabel: 'PAID'   },
+  { id: 'emergency',   label: 'Emergency',   emoji: '🚨', color: 'var(--red)',    paid: false, paidLabel: 'UNPAID' },
+  { id: 'personal',    label: 'Personal',    emoji: '📅', color: 'var(--amber)',  paid: false, paidLabel: 'UNPAID' },
+];
+const leaveType = id => LEAVE_TYPES.find(l => l.id === id) || LEAVE_TYPES[0];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COACHING / FEEDBACK SYSTEM (NEW v5.1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Manager-to-agent performance log. Agent sees their own notes; manager sees all.
+// Audit-trail immutable (cannot be deleted, only superseded by newer notes).
+const COACHING_CATEGORIES = [
+  { id: 'praise',      label: '⭐ Praise',       color: 'var(--teal)',   bg: 'rgba(34,211,165,.07)' },
+  { id: 'improvement', label: '💡 Improvement',  color: 'var(--blue)',   bg: 'rgba(56,189,248,.07)' },
+  { id: 'warning',     label: '⚠ Warning',       color: 'var(--amber)',  bg: 'rgba(245,158,11,.07)' },
+  { id: 'goal',        label: '🎯 Goal',         color: 'var(--purple)', bg: 'rgba(192,132,252,.07)' },
+];
+const coachCat = id => COACHING_CATEGORIES.find(c => c.id === id) || COACHING_CATEGORIES[0];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PH HOLIDAY CALENDAR (NEW v5.1) — auto premium pay in payroll
+// ─────────────────────────────────────────────────────────────────────────────
+// Per PH Labor Code: regular holidays = 200% if worked; special = 130% if worked.
+// Source: Proclamation No. 727 (s. 2024) and successor proclamations.
+// UPDATE THIS LIST ANNUALLY when Malacañang releases the next proclamation.
+const PH_HOLIDAYS = [
+  // 2026
+  { date: '2026-01-01', name: "New Year's Day",        type: 'regular' },
+  { date: '2026-04-02', name: 'Maundy Thursday',       type: 'regular' },
+  { date: '2026-04-03', name: 'Good Friday',           type: 'regular' },
+  { date: '2026-04-09', name: 'Day of Valor',          type: 'regular' },
+  { date: '2026-05-01', name: 'Labor Day',             type: 'regular' },
+  { date: '2026-06-12', name: 'Independence Day',      type: 'regular' },
+  { date: '2026-08-31', name: 'National Heroes Day',   type: 'regular' },
+  { date: '2026-11-30', name: 'Bonifacio Day',         type: 'regular' },
+  { date: '2026-12-25', name: 'Christmas Day',         type: 'regular' },
+  { date: '2026-12-30', name: 'Rizal Day',             type: 'regular' },
+  { date: '2026-02-25', name: 'EDSA Anniversary',      type: 'special' },
+  { date: '2026-04-04', name: 'Black Saturday',        type: 'special' },
+  { date: '2026-08-21', name: 'Ninoy Aquino Day',      type: 'special' },
+  { date: '2026-11-01', name: "All Saints' Day",       type: 'special' },
+  { date: '2026-11-02', name: "All Souls' Day",        type: 'special' },
+  { date: '2026-12-08', name: 'Immaculate Conception', type: 'special' },
+  { date: '2026-12-24', name: 'Christmas Eve',         type: 'special' },
+  { date: '2026-12-31', name: "New Year's Eve",        type: 'special' },
+  // 2027 (verify against final proclamation when issued)
+  { date: '2027-01-01', name: "New Year's Day",        type: 'regular' },
+  { date: '2027-03-25', name: 'Maundy Thursday',       type: 'regular' },
+  { date: '2027-03-26', name: 'Good Friday',           type: 'regular' },
+  { date: '2027-04-09', name: 'Day of Valor',          type: 'regular' },
+  { date: '2027-05-01', name: 'Labor Day',             type: 'regular' },
+  { date: '2027-06-12', name: 'Independence Day',      type: 'regular' },
+  { date: '2027-08-30', name: 'National Heroes Day',   type: 'regular' },
+  { date: '2027-11-30', name: 'Bonifacio Day',         type: 'regular' },
+  { date: '2027-12-25', name: 'Christmas Day',         type: 'regular' },
+  { date: '2027-12-30', name: 'Rizal Day',             type: 'regular' },
+];
+const HOLIDAY_REGULAR_RATE = 2.00; // worked = 200%
+const HOLIDAY_SPECIAL_RATE = 1.30; // worked = 130%
+const isHolidayPH = (dateStr) => PH_HOLIDAYS.find(h => h.date === dateStr) || null;
+
+// Days between two YYYY-MM-DD dates inclusive (PH time). Used by leave system.
+const daysBetweenPH = (fromStr, toStr) => {
+  const out = [];
+  if (!fromStr || !toStr) return out;
+  const start = new Date(fromStr + 'T00:00:00+08:00').getTime();
+  const end   = new Date(toStr   + 'T00:00:00+08:00').getTime();
+  for (let t = start; t <= end; t += 86_400_000) {
+    out.push(new Date(t).toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' }));
+  }
+  return out;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -575,6 +657,16 @@ function AppInner() {
   // Quota clock-out confirmation modal
   const [quotaConfirmModal, setQuotaConfirmModal] = useState(null); // { tickets, target } or null
 
+  // ── Leave System (NEW v5.1) ──
+  const [leaveReqs,  setLeaveReqs]  = useState([]);
+  const [leaveModal, setLeaveModal] = useState(false);
+  const [leaveForm,  setLeaveForm]  = useState({ type: 'sick', from: tsKey(), to: tsKey(), reason: '' });
+
+  // ── Coaching System (NEW v5.1) ──
+  const [coachingNotes, setCoachingNotes] = useState([]);
+  const [coachModal,    setCoachModal]    = useState(null); // agent obj when manager opens
+  const [coachForm,     setCoachForm]     = useState({ category: 'praise', text: '' });
+
   // ── tick ──
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
 
@@ -682,7 +774,7 @@ function AppInner() {
       const uRows = d.filter(i => USER_ACTIONS.includes(i.action))
         .map(r => ({ ...r, timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() }))
         .sort((a, b) => a.timestamp - b.timestamp); // ASC — latest action wins
-      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET','LATE_UNLOCK_REQUEST','LATE_UNLOCK','QUOTA_SHORTFALL'].includes(i.action))
+      const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET','LATE_UNLOCK_REQUEST','LATE_UNLOCK','QUOTA_SHORTFALL','LEAVE_REQUEST','LEAVE_APPROVE','LEAVE_DENY','COACHING_NOTE'].includes(i.action))
         .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
         .sort((a, b) => b.timestamp - a.timestamp);
 
@@ -712,6 +804,11 @@ function AppInner() {
       const lateGrants_ = d.filter(i => i.action === 'LATE_UNLOCK').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       // Quota shortfalls (Helpwave clock-outs below quota)
       const shortfalls_ = d.filter(i => i.action === 'QUOTA_SHORTFALL').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      // Leave system (NEW v5.1)
+      const leaves_  = d.filter(i => ['LEAVE_REQUEST','LEAVE_APPROVE','LEAVE_DENY'].includes(i.action))
+        .map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      // Coaching notes (NEW v5.1)
+      const coaches_ = d.filter(i => i.action === 'COACHING_NOTE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
       // Build latest day-off per agent (most recent DAYOFF_SET wins)
       const dayOffMap = {};
       d.filter(i => i.action === 'DAYOFF_SET').map(parse)
@@ -763,6 +860,8 @@ function AppInner() {
       setLateReqs(lateReqs_);
       setLateGrants(lateGrants_);
       setQuotaShortfalls(shortfalls_);
+      setLeaveReqs(leaves_);
+      setCoachingNotes(coaches_);
     } catch (e) { console.error(e); }
     setBusy(false);
   }, []);
@@ -890,14 +989,22 @@ function AppInner() {
   // anything and the user gets a clear message.
   const doAction = async (type) => {
     // Pre-flight gates
-    if (type === 'clockIn' && lateLockState) {
-      if (lateLockState.state === 'early') {
-        return showToast(`Too early — clock-in opens at ${phTimeShort(lateLockState.earliest)}`, 'err');
+    if (type === 'clockIn') {
+      // NEW v5.1 — block if on an approved leave covering today
+      const onLeave = isOnApprovedLeave(user.name);
+      if (onLeave) {
+        const lt = leaveType(onLeave.type);
+        return showToast(`On approved ${lt.label.toLowerCase()} ${onLeave.from}${onLeave.from !== onLeave.to ? ' → ' + onLeave.to : ''}`, 'err');
       }
-      if (lateLockState.state === 'locked') {
-        return showToast('Locked — request manager unlock to clock in', 'err');
+      if (lateLockState) {
+        if (lateLockState.state === 'early') {
+          return showToast(`Too early — clock-in opens at ${phTimeShort(lateLockState.earliest)}`, 'err');
+        }
+        if (lateLockState.state === 'locked') {
+          return showToast('Locked — request manager unlock to clock in', 'err');
+        }
+        // 'grace', 'late', 'unlocked' all proceed
       }
-      // 'grace', 'late', 'unlocked' all proceed
     }
     if (type === 'dutyPause') {
       if (pauseAtMax) return showToast('Pause limit reached (2h max per shift)', 'err');
@@ -1180,6 +1287,78 @@ function AppInner() {
     }
 
     showToast(decision === 'approve' ? 'Swap approved!' : 'Swap denied.');
+    await fetch_(); setBusy(false);
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  // LEAVE REQUEST (NEW v5.1) — agent submits a date-range leave request
+  // ─────────────────────────────────────────────────────────────────────
+  const doLeaveRequest = async () => {
+    if (!leaveForm.from || !leaveForm.to) return showToast('Pick a date range', 'err');
+    if (leaveForm.from > leaveForm.to)    return showToast('End date is before start date', 'err');
+    setBusy(true);
+    await post({
+      date: phNowDate(), time: phNowTime(),
+      action: 'LEAVE_REQUEST', agent: user.name, timestamp: Date.now(),
+      device: JSON.stringify({
+        type: leaveForm.type,
+        from: leaveForm.from,
+        to:   leaveForm.to,
+        reason: leaveForm.reason,
+        paid: leaveType(leaveForm.type).paid,
+        status: 'pending',
+      }),
+    });
+    showToast('Leave request sent — awaiting manager approval');
+    setLeaveModal(false);
+    setLeaveForm({ type: 'sick', from: tsKey(), to: tsKey(), reason: '' });
+    await fetch_(); setBusy(false);
+  };
+
+  // LEAVE DECISION (manager). Mirrors doSwapDecision: stamps `reqTimestamp`
+  // so the decision row resolves to the same key as the request in the dedup memo.
+  const doLeaveDecision = async (req, decision) => {
+    setBusy(true);
+    await post({
+      date: phNowDate(), time: phNowTime(),
+      action: decision === 'approve' ? 'LEAVE_APPROVE' : 'LEAVE_DENY',
+      agent: user.name, timestamp: Date.now(),
+      device: JSON.stringify({
+        type: req.type,
+        from: req.from,
+        to:   req.to,
+        reason: req.reason,
+        paid:  req.paid,
+        targetAgent:  req.agent,        // who owns the leave (since `agent` here is the decider)
+        reqTimestamp: req.timestamp,   // matches request → decision in dedup
+        status: decision === 'approve' ? 'approved' : 'denied',
+        decidedBy: user.name,
+      }),
+    });
+    showToast(decision === 'approve' ? 'Leave approved' : 'Leave denied');
+    await fetch_(); setBusy(false);
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  // COACHING NOTE (NEW v5.1) — manager → agent feedback log
+  // ─────────────────────────────────────────────────────────────────────
+  const doCoachingNote = async () => {
+    if (!coachModal) return;
+    if (!coachForm.text.trim()) return showToast('Add note text', 'err');
+    setBusy(true);
+    await post({
+      date: phNowDate(), time: phNowTime(),
+      action: 'COACHING_NOTE', agent: user.name, timestamp: Date.now(),
+      device: JSON.stringify({
+        targetAgent: coachModal.name,
+        category: coachForm.category,
+        text: coachForm.text.trim(),
+        from: user.name,
+      }),
+    });
+    showToast(`${coachCat(coachForm.category).label} saved for ${coachModal.name}`);
+    setCoachModal(null);
+    setCoachForm({ category: 'praise', text: '' });
     await fetch_(); setBusy(false);
   };
 
@@ -1515,7 +1694,10 @@ function AppInner() {
         const sMs = Math.max(0, raw - pb);
         const nMs = Math.max(0, sMs - tb);
         const late = ci ? Math.max(0, ci - (schedStart(agent.shift || 'Morning', ci) + LATE_GRACE)) : 0;
-        return { date, ci, co, breakMs: tb, pauseMs: pb, shiftMs: sMs, workMs: nMs, otMs: Math.max(0, sMs - SHIFT_GOAL), lateMs: late };
+        // NEW v5.1 — holiday detection
+        const holiday = isHolidayPH(date);
+        const holidayMult = holiday ? (holiday.type === 'regular' ? HOLIDAY_REGULAR_RATE : HOLIDAY_SPECIAL_RATE) : 1.0;
+        return { date, ci, co, breakMs: tb, pauseMs: pb, shiftMs: sMs, workMs: nMs, otMs: Math.max(0, sMs - SHIFT_GOAL), lateMs: late, holiday, holidayMult };
       }).filter(d => d.ci);
 
       const totalShiftMs = days.reduce((s, d) => s + d.shiftMs, 0);
@@ -1523,11 +1705,13 @@ function AppInner() {
       const monthlySal   = agent.salary || 260;
       const dailyRate    = monthlySal / WORKING_DAYS;
       const hourlyRate   = dailyRate / 8;
-      const regularPay   = days.length * dailyRate;
+      // NEW v5.1 — regular pay applies holiday multipliers per day
+      const regularPay     = days.reduce((s, d) => s + (dailyRate * d.holidayMult), 0);
+      const holidayPremium = days.reduce((s, d) => s + (dailyRate * (d.holidayMult - 1.0)), 0);
       const otPay        = (totalOtMs / 3_600_000) * hourlyRate * 1.25; // 125% OT rate
       const grossPay     = regularPay + otPay;
 
-      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, grossPay, daysWorked: days.length };
+      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, holidayPremium, grossPay, daysWorked: days.length, holidayDaysWorked: days.filter(d => d.holiday).length };
     });
   }, [logs]);
 
@@ -1723,6 +1907,17 @@ function AppInner() {
     }
   }, [pauseMs, rec.onPause, user]); // eslint-disable-line
 
+  // Auto clock-out at 12h hard cap (NEW v5.1). Safety net for forgotten clock-outs.
+  // Idempotent — once clockedOut is true, this becomes a no-op.
+  useEffect(() => {
+    if (!user || user.role !== ROLE_AGENT) return;
+    if (!rec.clockIn || rec.clockedOut) return;
+    if (shMs >= AUTO_CLOCKOUT_MAX) {
+      doAction('clockOut');
+      showToast('12h cap reached — auto clocked out', 'warn');
+    }
+  }, [shMs, rec.clockIn, rec.clockedOut, user]); // eslint-disable-line
+
   // ── SWAP ELIGIBILITY ──
   // For a PARTNER day-off swap, the candidate must be:
   //   - active agent (not me)
@@ -1772,6 +1967,79 @@ function AppInner() {
       s.status === 'approved'     || s.status === 'denied'
     );
   }, [swapReqs, user]);
+
+  // ─────────────────────────────────────────────────────────────────────
+  // LEAVE MEMOS (NEW v5.1) — request ↔ decision dedup like swaps
+  // ─────────────────────────────────────────────────────────────────────
+  const leaveKey = l => `${l.targetAgent || l.agent || ''}|${l.type || ''}|${l.from || ''}|${l.to || ''}|${l.reqTimestamp || l.timestamp || ''}`;
+
+  const _latestLeaveByKey = useMemo(() => {
+    const map = {};
+    leaveReqs.forEach(l => {
+      const k = leaveKey(l);
+      if (!map[k]) { map[k] = l; return; }
+      const cur = map[k];
+      const isDecision    = l.action === 'LEAVE_APPROVE'   || l.action === 'LEAVE_DENY';
+      const curIsDecision = cur.action === 'LEAVE_APPROVE' || cur.action === 'LEAVE_DENY';
+      if (isDecision && !curIsDecision) map[k] = l;
+      else if (isDecision && curIsDecision && (Number(l.timestamp)||0) > (Number(cur.timestamp)||0)) map[k] = l;
+    });
+    return map;
+  }, [leaveReqs]);
+
+  const approvedLeaves = useMemo(() =>
+    Object.values(_latestLeaveByKey).filter(l => l.action === 'LEAVE_APPROVE' || l.status === 'approved'),
+    [_latestLeaveByKey]);
+
+  const pendingLeaves = useMemo(() => {
+    const decided = new Set(
+      leaveReqs
+        .filter(l => l.action === 'LEAVE_APPROVE' || l.action === 'LEAVE_DENY')
+        .map(l => leaveKey(l))
+    );
+    return leaveReqs
+      .filter(l => l.action === 'LEAVE_REQUEST' && !decided.has(leaveKey(l)))
+      .sort((a,b) => (Number(a.timestamp)||0) - (Number(b.timestamp)||0));
+  }, [leaveReqs]);
+
+  // Is `agentName` on an approved leave that covers today?
+  const isOnApprovedLeave = useCallback((agentName) => {
+    const today = tsKey();
+    return approvedLeaves.find(l => {
+      const owner = l.targetAgent || l.agent;
+      return owner === agentName && l.from <= today && l.to >= today;
+    }) || null;
+  }, [approvedLeaves]);
+
+  // Agent's own leave history (any state) — for "My Leave Requests" panel
+  const myLeaves = useMemo(() => {
+    if (!user) return [];
+    const map = {};
+    leaveReqs.forEach(l => {
+      const owner = l.targetAgent || l.agent;
+      if (owner !== user.name) return;
+      const k = leaveKey(l);
+      if (!map[k] || l.action === 'LEAVE_APPROVE' || l.action === 'LEAVE_DENY') map[k] = l;
+    });
+    return Object.values(map).sort((a,b) => (Number(b.timestamp)||0) - (Number(a.timestamp)||0));
+  }, [leaveReqs, user]);
+
+  // ─────────────────────────────────────────────────────────────────────
+  // COACHING MEMOS (NEW v5.1)
+  // ─────────────────────────────────────────────────────────────────────
+  const myCoachingNotes = useMemo(() => {
+    if (!user) return [];
+    return coachingNotes
+      .filter(c => c.targetAgent === user.name)
+      .sort((a,b) => (Number(b.timestamp)||0) - (Number(a.timestamp)||0));
+  }, [coachingNotes, user]);
+
+  const myCoachingSummary = useMemo(() => {
+    const sum = { praise: 0, improvement: 0, warning: 0, goal: 0 };
+    myCoachingNotes.forEach(n => { if (sum[n.category] !== undefined) sum[n.category]++; });
+    return sum;
+  }, [myCoachingNotes]);
+
   const escKey = e => `${e.agent}|${e.date}|${e.time}|${String(e.title||'').slice(0,20)}`;
   const openEscals    = useMemo(() => escals.filter(e => !e.resolved), [escals]);
 
@@ -2004,8 +2272,30 @@ function AppInner() {
                 </div>
               )}
 
+              {/* ON LEAVE BLOCK (NEW v5.1) — takes priority over day-off block */}
+              {(() => {
+                const onLeave = isOnApprovedLeave(user.name);
+                if (!onLeave || rec.clockIn) return null;
+                const lt = leaveType(onLeave.type);
+                return (
+                  <div style={{ padding: '28px 24px', borderRadius: 16, background: 'rgba(56,189,248,0.06)', border: `1px solid ${lt.color}40`, textAlign: 'center' }}>
+                    <div style={{ fontSize: 48, marginBottom: 12 }}>{lt.emoji}</div>
+                    <div style={{ fontWeight: 800, fontSize: 20, marginBottom: 6 }}>On {lt.label} Today</div>
+                    <div style={{ fontSize: 13, color: 'var(--sub)', fontFamily: 'var(--mono)', marginBottom: 8 }}>
+                      {phDateLong(new Date(onLeave.from + 'T12:00:00+08:00').getTime())}
+                      {onLeave.from !== onLeave.to && <> → {phDateLong(new Date(onLeave.to + 'T12:00:00+08:00').getTime())}</>}
+                    </div>
+                    <Chip color={lt.color}>{lt.paidLabel} · APPROVED</Chip>
+                    {onLeave.reason && <div style={{ fontSize: 12, color: 'var(--sub)', marginTop: 12, fontStyle: 'italic' }}>"{onLeave.reason}"</div>}
+                    <div className="alert awn" style={{ maxWidth: 360, margin: '16px auto 0', justifyContent: 'center' }}>
+                      Clock-in is disabled while you're on approved leave.
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* DAY OFF BLOCK — replaces session card when on day off and not already clocked in */}
-              {isOnDayOff(user.name) && !rec.clockIn && (
+              {!isOnApprovedLeave(user.name) && isOnDayOff(user.name) && !rec.clockIn && (
                 <div style={{ padding: '28px 24px', borderRadius: 16, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)', textAlign: 'center' }}>
                   <div style={{ fontSize: 48, marginBottom: 12 }}>🏖</div>
                   <div style={{ fontWeight: 800, fontSize: 20, marginBottom: 6 }}>Today is your Day Off</div>
@@ -2189,6 +2479,7 @@ function AppInner() {
                       ↺ MOVE MY OFF
                     </button>
                     <button className="btn br" style={{ fontSize: 11 }} onClick={() => setEscalModal(true)}>🚨 ESCALATE</button>
+                    <button className="btn ba" style={{ fontSize: 11 }} onClick={() => setLeaveModal(true)}>🏖 LEAVE</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={() => setMemoModal(true)}>📝 MEMO</button>
                     <button className="btn bt" style={{ fontSize: 11 }} onClick={() => setStatsModal(true)}>📊 MY STATS</button>
                     <button className="btn bg" style={{ fontSize: 11 }} onClick={() => { setPwErr(''); setPwForm({current:'',next:'',confirm:''}); setPwModal(true); }}>🔒 PASSWORD</button>
@@ -2223,6 +2514,38 @@ function AppInner() {
                             </div>
                             <Chip color={approved ? 'var(--teal)' : 'var(--red)'}>
                               {approved ? '✓ APPROVED' : '✕ DENIED'}
+                            </Chip>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </Glass>}
+
+                  {/* My leaves (NEW v5.1) */}
+                  {myLeaves.length > 0 && <Glass style={{ padding: 16 }}>
+                    <SectionHead>My Leave Requests</SectionHead>
+                    {myLeaves.slice(0, 5).map((l, i) => {
+                      const lt = leaveType(l.type);
+                      const decided = l.action === 'LEAVE_APPROVE' || l.action === 'LEAVE_DENY' || l.status === 'approved' || l.status === 'denied';
+                      const approved = l.action === 'LEAVE_APPROVE' || l.status === 'approved';
+                      const dayCount = daysBetweenPH(l.from, l.to).length;
+                      return (
+                        <div key={i} style={{ padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,.05)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+                                <Chip color={lt.color} small>{lt.emoji} {lt.label.toUpperCase()}</Chip>
+                                <Chip color={lt.paid ? 'var(--teal)' : 'var(--sub)'} small>{lt.paidLabel}</Chip>
+                                <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{dayCount} day{dayCount !== 1 ? 's' : ''}</span>
+                              </div>
+                              <div style={{ fontSize: 12, color: 'var(--text)', fontFamily: 'var(--mono)' }}>
+                                {l.from}{l.from !== l.to && <> → {l.to}</>}
+                              </div>
+                              {l.reason && <div style={{ fontSize: 11, color: 'var(--sub)', fontStyle: 'italic', marginTop: 4 }}>"{l.reason}"</div>}
+                              {l.decidedBy && <div style={{ fontSize: 10, color: 'var(--sub)', marginTop: 3, fontFamily: 'var(--mono)' }}>by {l.decidedBy}</div>}
+                            </div>
+                            <Chip color={!decided ? 'var(--amber)' : approved ? 'var(--teal)' : 'var(--red)'}>
+                              {!decided ? '⏳ PENDING' : approved ? '✓ APPROVED' : '✕ DENIED'}
                             </Chip>
                           </div>
                         </div>
@@ -2403,6 +2726,7 @@ function AppInner() {
                   </div>
                   {openEscals.length > 0 && <Chip color="var(--red)">🚨 {openEscals.length} ESCALATION{openEscals.length !== 1 ? 'S' : ''}</Chip>}
                   {pendingSwaps.length > 0 && <Chip color="var(--amber)">⇄ {pendingSwaps.length} SWAP{pendingSwaps.length !== 1 ? 'S' : ''}</Chip>}
+                  {pendingLeaves.length > 0 && <Chip color="var(--amber)">🏖 {pendingLeaves.length} LEAVE{pendingLeaves.length !== 1 ? 'S' : ''}</Chip>}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -2423,10 +2747,13 @@ function AppInner() {
             </div>
 
             <div className="tabs">
-              {['attendance','payroll','kpi','swaps','escalations','schedule','team','logs','onboarding'].map(t => {
+              {['attendance','payroll','kpi','swaps','leaves','escalations','schedule','team','coaching','logs','onboarding'].map(t => {
                 const pendingCount = agents.filter(a => a.status === 'pending').length;
                 let label = t.toUpperCase();
                 if (t === 'swaps' && pendingSwaps.length > 0) label = `SWAPS (${pendingSwaps.length})`;
+                else if (t === 'leaves' && pendingLeaves.length > 0) label = `🏖 LEAVES (${pendingLeaves.length})`;
+                else if (t === 'leaves') label = '🏖 LEAVES';
+                else if (t === 'coaching') label = '💬 COACHING';
                 else if (t === 'escalations' && openEscals.length > 0) label = `🚨 ESC (${openEscals.length})`;
                 else if (t === 'onboarding') label = pendingCount > 0 ? `AGENTS (${pendingCount})` : 'AGENTS';
                 else if (t === 'kpi') label = '📊 KPI';
@@ -2462,6 +2789,38 @@ function AppInner() {
                         </div>
                       </div>
                     ))}
+                  </Glass>
+                )}
+
+                {/* PENDING LEAVE REQUESTS (NEW v5.1) */}
+                {pendingLeaves.length > 0 && (
+                  <Glass style={{ borderColor: 'rgba(245,158,11,0.25)' }}>
+                    <SectionHead>
+                      🏖 Pending Leave Requests
+                      <Chip color="var(--amber)">{pendingLeaves.length} AWAITING</Chip>
+                    </SectionHead>
+                    {pendingLeaves.slice(0, 4).map((l, i) => {
+                      const lt = leaveType(l.type);
+                      return (
+                        <div key={i} style={{ padding: '10px 13px', borderRadius: 10, marginBottom: 6, background: 'rgba(245,158,11,.05)', border: '1px solid rgba(245,158,11,.15)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <span>{lt.emoji}</span>
+                              <strong style={{ fontSize: 13 }}>{l.agent}</strong>
+                              <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{lt.label} · {l.from}{l.from !== l.to ? `→${l.to}` : ''}</span>
+                              <Chip color={lt.paid ? 'var(--teal)' : 'var(--sub)'} small>{lt.paidLabel}</Chip>
+                            </div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button className="btn bt" style={{ fontSize: 10, minHeight: 30, padding: '5px 12px' }} onClick={() => doLeaveDecision(l, 'approve')}>✓</button>
+                              <button className="btn br" style={{ fontSize: 10, minHeight: 30, padding: '5px 12px' }} onClick={() => doLeaveDecision(l, 'deny')}>✕</button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {pendingLeaves.length > 4 && (
+                      <button className="btn bg bw" style={{ fontSize: 11, marginTop: 4 }} onClick={() => setTab('leaves')}>VIEW ALL ({pendingLeaves.length})</button>
+                    )}
                   </Glass>
                 )}
 
@@ -2734,6 +3093,86 @@ function AppInner() {
               </div>
             )}
 
+            {/* LEAVES (NEW v5.1) */}
+            {tab === 'leaves' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div className="g2sm">
+                  <div className="sc" style={{ background: 'rgba(245,158,11,.08)', border: '1px solid rgba(245,158,11,.2)' }}>
+                    <div className="sv" style={{ color: 'var(--amber)' }}>{pendingLeaves.length}</div>
+                    <div className="sl">PENDING</div>
+                  </div>
+                  <div className="sc" style={{ background: 'rgba(34,211,165,.08)', border: '1px solid rgba(34,211,165,.2)' }}>
+                    <div className="sv" style={{ color: 'var(--teal)' }}>{approvedLeaves.length}</div>
+                    <div className="sl">APPROVED</div>
+                  </div>
+                </div>
+
+                <Glass>
+                  <SectionHead>Pending Leave Requests</SectionHead>
+                  {pendingLeaves.length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '16px 0', fontSize: 13 }}>No pending leaves.</div>
+                    : pendingLeaves.map((l, i) => {
+                      const lt = leaveType(l.type);
+                      const dayCount = daysBetweenPH(l.from, l.to).length;
+                      return (
+                        <div key={i} style={{ padding: 14, borderRadius: 12, marginBottom: 10, background: 'rgba(0,0,0,.3)', border: '1px solid rgba(255,255,255,.07)' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+                                <Chip color={lt.color}>{lt.emoji} {lt.label.toUpperCase()}</Chip>
+                                <Chip color={lt.paid ? 'var(--teal)' : 'var(--sub)'} small>{lt.paidLabel}</Chip>
+                              </div>
+                              <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--teal)' }}>{l.agent}</div>
+                              <div style={{ fontSize: 12, color: 'var(--text)', fontFamily: 'var(--mono)', marginTop: 4 }}>
+                                {l.from}{l.from !== l.to && <> <span style={{ color: 'var(--purple)' }}>→</span> {l.to}</>}
+                                <span style={{ color: 'var(--sub)', marginLeft: 8 }}>· {dayCount} day{dayCount !== 1 ? 's' : ''}</span>
+                              </div>
+                              <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 3 }}>filed {l.date} {l.time}</div>
+                              {l.reason && <div style={{ fontSize: 12, color: 'var(--text)', marginTop: 6, fontStyle: 'italic' }}>"{l.reason}"</div>}
+                            </div>
+                            <div style={{ display: 'flex', gap: 7, flexShrink: 0 }}>
+                              <button className="btn bt" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }} onClick={() => doLeaveDecision(l, 'approve')}>APPROVE</button>
+                              <button className="btn br" style={{ fontSize: 11, minHeight: 36, padding: '7px 14px' }} onClick={() => doLeaveDecision(l, 'deny')}>DENY</button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </Glass>
+
+                <Glass>
+                  <SectionHead>
+                    Approved & Upcoming
+                    <Chip color="var(--teal)">{approvedLeaves.filter(l => l.to >= tsKey()).length} CURRENT/UPCOMING</Chip>
+                  </SectionHead>
+                  {approvedLeaves.length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '16px 0', fontSize: 13 }}>None approved yet.</div>
+                    : approvedLeaves
+                        .slice()
+                        .sort((a, b) => (a.from || '').localeCompare(b.from || ''))
+                        .map((l, i) => {
+                          const lt = leaveType(l.type);
+                          const owner = l.targetAgent || l.agent;
+                          const today = tsKey();
+                          const isCurrent = l.from <= today && l.to >= today;
+                          const isPast    = l.to < today;
+                          return (
+                            <div key={i} style={{ padding: '11px 13px', borderRadius: 10, marginBottom: 6, background: isCurrent ? `${lt.color}11` : 'rgba(0,0,0,.2)', border: `1px solid ${isCurrent ? `${lt.color}30` : 'rgba(255,255,255,.05)'}`, opacity: isPast ? 0.55 : 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                <Chip color={lt.color} small>{lt.emoji}</Chip>
+                                <span style={{ fontWeight: 700, fontSize: 13 }}>{owner}</span>
+                                <span style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{l.from} → {l.to}</span>
+                                {isCurrent && <Chip color={lt.color} small>ON LEAVE NOW</Chip>}
+                                {isPast && <Chip color="var(--sub)" small>PAST</Chip>}
+                                <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>by {l.decidedBy || '—'}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                </Glass>
+              </div>
+            )}
+
             {/* ESCALATIONS */}
             {tab === 'escalations' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -2797,6 +3236,45 @@ function AppInner() {
             {/* ── SCHEDULE / DAY OFF TAB ── */}
             {tab === 'schedule' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* PH HOLIDAYS (NEW v5.1) — auto premium pay reference */}
+                {(() => {
+                  const today = tsKey();
+                  const upcoming = PH_HOLIDAYS
+                    .filter(h => h.date >= today)
+                    .sort((a, b) => a.date.localeCompare(b.date))
+                    .slice(0, 8);
+                  if (upcoming.length === 0) return null;
+                  return (
+                    <Glass>
+                      <SectionHead>
+                        🎉 PH Holidays — Upcoming
+                        <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>auto premium pay in payroll</span>
+                      </SectionHead>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+                        {upcoming.map((h, i) => {
+                          const isRegular = h.type === 'regular';
+                          const color = isRegular ? 'var(--red)' : 'var(--blue)';
+                          const bg = isRegular ? 'rgba(244,63,94,.06)' : 'rgba(56,189,248,.06)';
+                          const border = isRegular ? 'rgba(244,63,94,.18)' : 'rgba(56,189,248,.18)';
+                          const days = Math.round((new Date(h.date + 'T12:00:00+08:00').getTime() - new Date(today + 'T12:00:00+08:00').getTime()) / 86_400_000);
+                          return (
+                            <div key={i} style={{ padding: 12, borderRadius: 12, background: bg, border: `1px solid ${border}` }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                                <Chip color={color} small>{isRegular ? 'REGULAR · 200%' : 'SPECIAL · 130%'}</Chip>
+                                {days <= 7 && <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)', fontFamily: 'var(--mono)' }}>IN {days}D</span>}
+                              </div>
+                              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{h.name}</div>
+                              <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>
+                                {phDateFull(new Date(h.date + 'T12:00:00+08:00').getTime())}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </Glass>
+                  );
+                })()}
 
                 {/* Weekly roster overview */}
                 <Glass>
@@ -2981,6 +3459,70 @@ function AppInner() {
                             )}
                             {ackList.length === 0 && <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>No acknowledgements yet</span>}
                           </div>
+                        </div>
+                      );
+                    })}
+                </Glass>
+              </div>
+            )}
+
+            {/* COACHING (NEW v5.1) */}
+            {tab === 'coaching' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div className="g4">
+                  {COACHING_CATEGORIES.map(c => {
+                    const count = coachingNotes.filter(n => n.category === c.id).length;
+                    return (
+                      <div key={c.id} className="sc" style={{ background: c.bg, border: `1px solid ${c.color}25` }}>
+                        <div className="sv" style={{ color: c.color }}>{count}</div>
+                        <div className="sl">{c.label.replace(/^\S+\s/, '').toUpperCase()}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <Glass>
+                  <SectionHead>Coach an Agent</SectionHead>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8 }}>
+                    {agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT)
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map(a => {
+                        const myNotes = coachingNotes.filter(n => n.targetAgent === a.name);
+                        const lastNote = myNotes[0];
+                        return (
+                          <button key={a.name}
+                            onClick={() => { setCoachModal(a); setCoachForm({ category: 'praise', text: '' }); }}
+                            style={{ padding: '12px 10px', borderRadius: 12, background: 'rgba(0,0,0,.25)', border: '1px solid rgba(255,255,255,.08)', textAlign: 'left', cursor: 'pointer', color: 'var(--text)', fontFamily: 'var(--font)', minHeight: 70 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                              <div className="av" style={{ background: dg(a.platform), color: dc(a.platform), width: 28, height: 28, fontSize: 11 }}>{a.name[0]}</div>
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: 12 }}>{a.name}</div>
+                                <div style={{ fontSize: 9, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 1 }}>{a.platform} · {myNotes.length} note{myNotes.length !== 1 ? 's' : ''}</div>
+                              </div>
+                            </div>
+                            {lastNote && <div style={{ fontSize: 9, color: coachCat(lastNote.category).color, marginTop: 7, fontFamily: 'var(--mono)' }}>↳ {coachCat(lastNote.category).label} · {lastNote.date}</div>}
+                          </button>
+                        );
+                      })}
+                  </div>
+                </Glass>
+
+                <Glass>
+                  <SectionHead>Recent Coaching Notes</SectionHead>
+                  {coachingNotes.length === 0
+                    ? <div style={{ textAlign: 'center', color: 'var(--sub)', padding: '14px 0' }}>No notes yet.</div>
+                    : coachingNotes.slice(0, 20).map((n, i) => {
+                      const c = coachCat(n.category);
+                      return (
+                        <div key={i} style={{ padding: '11px 13px', borderRadius: 10, marginBottom: 7, background: c.bg, border: `1px solid ${c.color}25` }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5, flexWrap: 'wrap', gap: 6 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
+                              <Chip color={c.color} small>{c.label}</Chip>
+                              <span style={{ fontWeight: 700, fontSize: 12 }}>→ {n.targetAgent}</span>
+                            </div>
+                            <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>{n.from} · {n.date} {n.time}</span>
+                          </div>
+                          <div style={{ fontSize: 12, lineHeight: 1.5 }}>{n.text}</div>
                         </div>
                       );
                     })}
@@ -3607,6 +4149,34 @@ function AppInner() {
               </div>
             }
 
+            {/* Coaching notes (NEW v5.1) */}
+            {myCoachingNotes.length > 0 && (
+              <>
+                <Sep />
+                <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 10 }}>COACHING & FEEDBACK</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, marginBottom: 12 }}>
+                  {COACHING_CATEGORIES.map(c => (
+                    <div key={c.id} style={{ textAlign: 'center', padding: '8px 6px', borderRadius: 10, background: c.bg, border: `1px solid ${c.color}25` }}>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: c.color }}>{myCoachingSummary[c.id]}</div>
+                      <div style={{ fontSize: 8, color: 'var(--sub)', fontFamily: 'var(--mono)', marginTop: 2, letterSpacing: 1 }}>{c.label.replace(/^\S+\s/, '').toUpperCase()}</div>
+                    </div>
+                  ))}
+                </div>
+                {myCoachingNotes.slice(0, 5).map((n, i) => {
+                  const c = coachCat(n.category);
+                  return (
+                    <div key={i} style={{ padding: '10px 12px', borderRadius: 10, marginBottom: 6, background: c.bg, border: `1px solid ${c.color}25` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, marginBottom: 4, fontFamily: 'var(--mono)' }}>
+                        <span style={{ color: c.color, fontWeight: 700 }}>{c.label}</span>
+                        <span style={{ color: 'var(--sub)' }}>{n.from} · {n.date}</span>
+                      </div>
+                      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--text)' }}>{n.text}</div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
             <div className="alert awn" style={{ marginTop: 14, fontSize: 11, lineHeight: 1.5 }}>
               ⓘ This is a preview based on your clock-in records. Final payroll is calculated and approved by your manager. Discrepancies should be raised via the MEMO or ESCALATE button.
             </div>
@@ -3639,13 +4209,22 @@ function AppInner() {
               <div style={{ fontWeight: 700, fontSize: 11, letterSpacing: 2, marginBottom: 6, color: '#333' }}>DAILY BREAKDOWN</div>
               {payModal.days.map((d, i) => (
                 <div className="payslip-row" key={i}>
-                  <span>{phDateLong(new Date(d.date + 'T12:00:00+08:00').getTime())}</span>
+                  <span>
+                    {phDateLong(new Date(d.date + 'T12:00:00+08:00').getTime())}
+                    {d.holiday && (
+                      <span style={{ marginLeft: 8, padding: '1px 7px', borderRadius: 12, fontSize: 9, fontWeight: 700,
+                        background: d.holiday.type === 'regular' ? 'rgba(244,63,94,.15)' : 'rgba(56,189,248,.15)',
+                        color: d.holiday.type === 'regular' ? '#dc2626' : '#0284c7' }}>
+                        {d.holiday.type === 'regular' ? '🎉 REG · 200%' : '✨ SPECIAL · 130%'}
+                      </span>
+                    )}
+                  </span>
                   <span style={{ color: '#555', fontSize: 11 }}>
                     {d.ci ? phTimeShort(d.ci) : '?'} – {d.co ? phTimeShort(d.co) : 'ongoing'} · {fmtS(d.shiftMs)} shift
                     {d.lateMs > 0 && ` (${fmtS(d.lateMs)} late)`}
                     {d.otMs > 0 && ` (+${fmtS(d.otMs)} OT)`}
                   </span>
-                  <span style={{ fontWeight: 700 }}>{currency(payModal.dailyRate + (d.otMs / 3_600_000) * payModal.hourlyRate * 1.25)}</span>
+                  <span style={{ fontWeight: 700 }}>{currency(payModal.dailyRate * (d.holidayMult || 1) + (d.otMs / 3_600_000) * payModal.hourlyRate * 1.25)}</span>
                 </div>
               ))}
               {payModal.days.length === 0 && <div style={{ color: '#888', padding: '8px 0', fontSize: 12 }}>No attendance records for this period.</div>}
@@ -3653,12 +4232,154 @@ function AppInner() {
                 <div className="payslip-row"><span>Days Worked</span><span /><span>{payModal.daysWorked} day{payModal.daysWorked !== 1 ? 's' : ''}</span></div>
                 <div className="payslip-row"><span>Monthly Base Salary</span><span /><span>{currency(payModal.monthlySal)}</span></div>
                 <div className="payslip-row"><span>Daily Rate ({WORKING_DAYS} working days)</span><span /><span>{currency(payModal.dailyRate)}</span></div>
-                <div className="payslip-row"><span>Regular Pay ({payModal.daysWorked} days × {currency(payModal.dailyRate)})</span><span /><span>{currency(payModal.regularPay)}</span></div>
+                <div className="payslip-row"><span>Regular Pay</span><span /><span>{currency(payModal.regularPay)}</span></div>
+                {payModal.holidayPremium > 0 && (
+                  <div className="payslip-row"><span>↳ incl. Holiday Premium ({payModal.holidayDaysWorked} day{payModal.holidayDaysWorked !== 1 ? 's' : ''} worked)</span><span /><span style={{ color: '#dc2626' }}>+{currency(payModal.holidayPremium)}</span></div>
+                )}
                 {payModal.otPay > 0 && <div className="payslip-row"><span>Overtime Pay (×1.25)</span><span /><span style={{ color: '#6c47ff' }}>{currency(payModal.otPay)}</span></div>}
                 <div className="payslip-total"><span>GROSS PAY FOR PERIOD</span><span /><span>{currency(payModal.grossPay)}</span></div>
               </div>
             </div>
             <button className="btn bg bw" style={{ marginTop: 18 }} onClick={() => setPayModal(null)}>CLOSE</button>
+          </div>
+        </div>
+      )}
+
+      {/* LEAVE REQUEST MODAL (NEW v5.1) */}
+      {leaveModal && user && (
+        <div className="overlay" onClick={() => setLeaveModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ fontWeight: 800, fontSize: 19, marginBottom: 4 }}>🏖 Request Leave</div>
+            <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 18 }}>SICK · VACATION · EMERGENCY · OTHER</div>
+
+            <label className="lbl">LEAVE TYPE</label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6, marginBottom: 16 }}>
+              {LEAVE_TYPES.map(t => {
+                const on = leaveForm.type === t.id;
+                return (
+                  <button key={t.id} type="button" onClick={() => setLeaveForm({ ...leaveForm, type: t.id })}
+                    style={{
+                      padding: '10px 8px', borderRadius: 12, fontSize: 11, fontWeight: 700,
+                      fontFamily: 'var(--mono)', cursor: 'pointer', minHeight: 56, textAlign: 'left',
+                      background: on ? `${t.color}22` : 'rgba(255,255,255,.04)',
+                      color: on ? t.color : 'var(--sub)',
+                      border: `1px solid ${on ? `${t.color}55` : 'rgba(255,255,255,.08)'}`,
+                    }}>
+                    <div style={{ fontSize: 16 }}>{t.emoji}</div>
+                    <div style={{ marginTop: 4 }}>{t.label}</div>
+                    <div style={{ fontSize: 8, marginTop: 2, opacity: 0.7 }}>{t.paidLabel}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
+              <div>
+                <label className="lbl">FROM</label>
+                <input className="inp" type="date" value={leaveForm.from} onChange={e => setLeaveForm({ ...leaveForm, from: e.target.value })} />
+              </div>
+              <div>
+                <label className="lbl">TO</label>
+                <input className="inp" type="date" value={leaveForm.to} onChange={e => setLeaveForm({ ...leaveForm, to: e.target.value })} />
+              </div>
+            </div>
+
+            {leaveForm.from && leaveForm.to && leaveForm.from <= leaveForm.to && (() => {
+              const range = daysBetweenPH(leaveForm.from, leaveForm.to);
+              const lt = leaveType(leaveForm.type);
+              const hits = range.map(isHolidayPH).filter(Boolean);
+              return (
+                <div style={{ padding: 11, borderRadius: 10, marginBottom: 14, background: `${lt.color}11`, border: `1px solid ${lt.color}30`, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 13 }}>
+                  {range.length} day{range.length !== 1 ? 's' : ''} · {lt.paidLabel}
+                  {hits.length > 0 && <div style={{ fontSize: 10, color: 'var(--amber)', marginTop: 5 }}>⚠ Range includes {hits.length} holiday{hits.length !== 1 ? 's' : ''}: {hits.map(h => h.name).join(', ')}</div>}
+                </div>
+              );
+            })()}
+
+            <label className="lbl">REASON</label>
+            <textarea className="inp" style={{ minHeight: 80, marginBottom: 18 }}
+              placeholder="Brief explanation for your manager..."
+              value={leaveForm.reason}
+              onChange={e => setLeaveForm({ ...leaveForm, reason: e.target.value })} />
+
+            <button className="btn bt bw" disabled={busy} onClick={doLeaveRequest}>
+              {busy ? 'SUBMITTING…' : '📨 SUBMIT REQUEST'}
+            </button>
+            <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setLeaveModal(false)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* COACHING NOTE MODAL (NEW v5.1) */}
+      {coachModal && user && (
+        <div className="overlay" onClick={() => setCoachModal(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="drag" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4, flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 19 }}>💬 Coach {coachModal.name}</div>
+                <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginTop: 3 }}>{coachModal.platform} · {coachModal.position || 'Agent'}</div>
+              </div>
+              <Chip color={dc(coachModal.platform)}>◆ {coachModal.platform}</Chip>
+            </div>
+
+            {/* Recent notes for context */}
+            {(() => {
+              const recent = coachingNotes.filter(n => n.targetAgent === coachModal.name).slice(0, 3);
+              if (!recent.length) return null;
+              return (
+                <div style={{ marginTop: 14, marginBottom: 4 }}>
+                  <div style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: 2, marginBottom: 6 }}>RECENT NOTES</div>
+                  {recent.map((n, i) => {
+                    const c = coachCat(n.category);
+                    return (
+                      <div key={i} style={{ padding: '7px 10px', borderRadius: 8, marginBottom: 4, background: c.bg, border: `1px solid ${c.color}20`, fontSize: 11 }}>
+                        <span style={{ color: c.color, fontWeight: 700, marginRight: 6 }}>{c.label}</span>
+                        <span style={{ color: 'var(--sub)', fontSize: 10, fontFamily: 'var(--mono)' }}>{n.date}</span>
+                        <div style={{ marginTop: 3, color: 'var(--text)' }}>{n.text}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            <div style={{ marginTop: 14 }}>
+              <label className="lbl">CATEGORY</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6, marginBottom: 14 }}>
+                {COACHING_CATEGORIES.map(c => {
+                  const on = coachForm.category === c.id;
+                  return (
+                    <button key={c.id} type="button" onClick={() => setCoachForm({ ...coachForm, category: c.id })}
+                      style={{
+                        padding: '11px 10px', borderRadius: 12, fontSize: 12, fontWeight: 700,
+                        fontFamily: 'var(--mono)', cursor: 'pointer', minHeight: 44,
+                        background: on ? `${c.color}22` : 'rgba(255,255,255,.04)',
+                        color: on ? c.color : 'var(--sub)',
+                        border: `1px solid ${on ? `${c.color}55` : 'rgba(255,255,255,.08)'}`,
+                      }}>
+                      {c.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <label className="lbl">NOTE</label>
+              <textarea className="inp" style={{ minHeight: 110, marginBottom: 14 }}
+                placeholder="Be specific. Include what happened, observed impact, and next steps if applicable..."
+                value={coachForm.text}
+                onChange={e => setCoachForm({ ...coachForm, text: e.target.value })} />
+
+              <div className="alert awn" style={{ fontSize: 11, lineHeight: 1.5, marginBottom: 16 }}>
+                ⓘ This note will be visible to {coachModal.name} in their MY STATS view, and to other managers in the COACHING tab. It cannot be deleted (audit trail).
+              </div>
+
+              <button className="btn bt bw" disabled={busy} onClick={doCoachingNote}>
+                {busy ? 'SAVING…' : '💬 SAVE NOTE'}
+              </button>
+              <button className="btn bg bw" style={{ marginTop: 10 }} onClick={() => setCoachModal(null)}>CANCEL</button>
+            </div>
           </div>
         </div>
       )}
