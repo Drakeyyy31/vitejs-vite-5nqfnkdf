@@ -55,48 +55,6 @@ const COACHING_CATEGORIES = [
 ];
 const coachCat = id => COACHING_CATEGORIES.find(c => c.id === id) || COACHING_CATEGORIES[0];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PH HOLIDAY CALENDAR (NEW v5.1) — auto premium pay in payroll
-// ─────────────────────────────────────────────────────────────────────────────
-// Per PH Labor Code: regular holidays = 200% if worked; special = 130% if worked.
-// Source: Proclamation No. 727 (s. 2024) and successor proclamations.
-// UPDATE THIS LIST ANNUALLY when Malacañang releases the next proclamation.
-const PH_HOLIDAYS = [
-  // 2026
-  { date: '2026-01-01', name: "New Year's Day",        type: 'regular' },
-  { date: '2026-04-02', name: 'Maundy Thursday',       type: 'regular' },
-  { date: '2026-04-03', name: 'Good Friday',           type: 'regular' },
-  { date: '2026-04-09', name: 'Day of Valor',          type: 'regular' },
-  { date: '2026-05-01', name: 'Labor Day',             type: 'regular' },
-  { date: '2026-06-12', name: 'Independence Day',      type: 'regular' },
-  { date: '2026-08-31', name: 'National Heroes Day',   type: 'regular' },
-  { date: '2026-11-30', name: 'Bonifacio Day',         type: 'regular' },
-  { date: '2026-12-25', name: 'Christmas Day',         type: 'regular' },
-  { date: '2026-12-30', name: 'Rizal Day',             type: 'regular' },
-  { date: '2026-02-25', name: 'EDSA Anniversary',      type: 'special' },
-  { date: '2026-04-04', name: 'Black Saturday',        type: 'special' },
-  { date: '2026-08-21', name: 'Ninoy Aquino Day',      type: 'special' },
-  { date: '2026-11-01', name: "All Saints' Day",       type: 'special' },
-  { date: '2026-11-02', name: "All Souls' Day",        type: 'special' },
-  { date: '2026-12-08', name: 'Immaculate Conception', type: 'special' },
-  { date: '2026-12-24', name: 'Christmas Eve',         type: 'special' },
-  { date: '2026-12-31', name: "New Year's Eve",        type: 'special' },
-  // 2027 (verify against final proclamation when issued)
-  { date: '2027-01-01', name: "New Year's Day",        type: 'regular' },
-  { date: '2027-03-25', name: 'Maundy Thursday',       type: 'regular' },
-  { date: '2027-03-26', name: 'Good Friday',           type: 'regular' },
-  { date: '2027-04-09', name: 'Day of Valor',          type: 'regular' },
-  { date: '2027-05-01', name: 'Labor Day',             type: 'regular' },
-  { date: '2027-06-12', name: 'Independence Day',      type: 'regular' },
-  { date: '2027-08-30', name: 'National Heroes Day',   type: 'regular' },
-  { date: '2027-11-30', name: 'Bonifacio Day',         type: 'regular' },
-  { date: '2027-12-25', name: 'Christmas Day',         type: 'regular' },
-  { date: '2027-12-30', name: 'Rizal Day',             type: 'regular' },
-];
-const HOLIDAY_REGULAR_RATE = 2.00; // worked = 200%
-const HOLIDAY_SPECIAL_RATE = 1.30; // worked = 130%
-const isHolidayPH = (dateStr) => PH_HOLIDAYS.find(h => h.date === dateStr) || null;
-
 // Days between two YYYY-MM-DD dates inclusive (PH time). Used by leave system.
 const daysBetweenPH = (fromStr, toStr) => {
   const out = [];
@@ -1694,10 +1652,7 @@ function AppInner() {
         const sMs = Math.max(0, raw - pb);
         const nMs = Math.max(0, sMs - tb);
         const late = ci ? Math.max(0, ci - (schedStart(agent.shift || 'Morning', ci) + LATE_GRACE)) : 0;
-        // NEW v5.1 — holiday detection
-        const holiday = isHolidayPH(date);
-        const holidayMult = holiday ? (holiday.type === 'regular' ? HOLIDAY_REGULAR_RATE : HOLIDAY_SPECIAL_RATE) : 1.0;
-        return { date, ci, co, breakMs: tb, pauseMs: pb, shiftMs: sMs, workMs: nMs, otMs: Math.max(0, sMs - SHIFT_GOAL), lateMs: late, holiday, holidayMult };
+        return { date, ci, co, breakMs: tb, pauseMs: pb, shiftMs: sMs, workMs: nMs, otMs: Math.max(0, sMs - SHIFT_GOAL), lateMs: late };
       }).filter(d => d.ci);
 
       const totalShiftMs = days.reduce((s, d) => s + d.shiftMs, 0);
@@ -1705,13 +1660,11 @@ function AppInner() {
       const monthlySal   = agent.salary || 260;
       const dailyRate    = monthlySal / WORKING_DAYS;
       const hourlyRate   = dailyRate / 8;
-      // NEW v5.1 — regular pay applies holiday multipliers per day
-      const regularPay     = days.reduce((s, d) => s + (dailyRate * d.holidayMult), 0);
-      const holidayPremium = days.reduce((s, d) => s + (dailyRate * (d.holidayMult - 1.0)), 0);
+      const regularPay   = days.length * dailyRate;
       const otPay        = (totalOtMs / 3_600_000) * hourlyRate * 1.25; // 125% OT rate
       const grossPay     = regularPay + otPay;
 
-      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, holidayPremium, grossPay, daysWorked: days.length, holidayDaysWorked: days.filter(d => d.holiday).length };
+      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, grossPay, daysWorked: days.length };
     });
   }, [logs]);
 
@@ -3237,45 +3190,6 @@ function AppInner() {
             {tab === 'schedule' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
-                {/* PH HOLIDAYS (NEW v5.1) — auto premium pay reference */}
-                {(() => {
-                  const today = tsKey();
-                  const upcoming = PH_HOLIDAYS
-                    .filter(h => h.date >= today)
-                    .sort((a, b) => a.date.localeCompare(b.date))
-                    .slice(0, 8);
-                  if (upcoming.length === 0) return null;
-                  return (
-                    <Glass>
-                      <SectionHead>
-                        🎉 PH Holidays — Upcoming
-                        <span style={{ fontSize: 10, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>auto premium pay in payroll</span>
-                      </SectionHead>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
-                        {upcoming.map((h, i) => {
-                          const isRegular = h.type === 'regular';
-                          const color = isRegular ? 'var(--red)' : 'var(--blue)';
-                          const bg = isRegular ? 'rgba(244,63,94,.06)' : 'rgba(56,189,248,.06)';
-                          const border = isRegular ? 'rgba(244,63,94,.18)' : 'rgba(56,189,248,.18)';
-                          const days = Math.round((new Date(h.date + 'T12:00:00+08:00').getTime() - new Date(today + 'T12:00:00+08:00').getTime()) / 86_400_000);
-                          return (
-                            <div key={i} style={{ padding: 12, borderRadius: 12, background: bg, border: `1px solid ${border}` }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
-                                <Chip color={color} small>{isRegular ? 'REGULAR · 200%' : 'SPECIAL · 130%'}</Chip>
-                                {days <= 7 && <span style={{ fontSize: 9, fontWeight: 700, color: 'var(--amber)', fontFamily: 'var(--mono)' }}>IN {days}D</span>}
-                              </div>
-                              <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 2 }}>{h.name}</div>
-                              <div style={{ fontSize: 11, color: 'var(--sub)', fontFamily: 'var(--mono)' }}>
-                                {phDateFull(new Date(h.date + 'T12:00:00+08:00').getTime())}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </Glass>
-                  );
-                })()}
-
                 {/* Weekly roster overview */}
                 <Glass>
                   <SectionHead>Weekly Day-Off Roster</SectionHead>
@@ -4209,22 +4123,13 @@ function AppInner() {
               <div style={{ fontWeight: 700, fontSize: 11, letterSpacing: 2, marginBottom: 6, color: '#333' }}>DAILY BREAKDOWN</div>
               {payModal.days.map((d, i) => (
                 <div className="payslip-row" key={i}>
-                  <span>
-                    {phDateLong(new Date(d.date + 'T12:00:00+08:00').getTime())}
-                    {d.holiday && (
-                      <span style={{ marginLeft: 8, padding: '1px 7px', borderRadius: 12, fontSize: 9, fontWeight: 700,
-                        background: d.holiday.type === 'regular' ? 'rgba(244,63,94,.15)' : 'rgba(56,189,248,.15)',
-                        color: d.holiday.type === 'regular' ? '#dc2626' : '#0284c7' }}>
-                        {d.holiday.type === 'regular' ? '🎉 REG · 200%' : '✨ SPECIAL · 130%'}
-                      </span>
-                    )}
-                  </span>
+                  <span>{phDateLong(new Date(d.date + 'T12:00:00+08:00').getTime())}</span>
                   <span style={{ color: '#555', fontSize: 11 }}>
                     {d.ci ? phTimeShort(d.ci) : '?'} – {d.co ? phTimeShort(d.co) : 'ongoing'} · {fmtS(d.shiftMs)} shift
                     {d.lateMs > 0 && ` (${fmtS(d.lateMs)} late)`}
                     {d.otMs > 0 && ` (+${fmtS(d.otMs)} OT)`}
                   </span>
-                  <span style={{ fontWeight: 700 }}>{currency(payModal.dailyRate * (d.holidayMult || 1) + (d.otMs / 3_600_000) * payModal.hourlyRate * 1.25)}</span>
+                  <span style={{ fontWeight: 700 }}>{currency(payModal.dailyRate + (d.otMs / 3_600_000) * payModal.hourlyRate * 1.25)}</span>
                 </div>
               ))}
               {payModal.days.length === 0 && <div style={{ color: '#888', padding: '8px 0', fontSize: 12 }}>No attendance records for this period.</div>}
@@ -4232,10 +4137,7 @@ function AppInner() {
                 <div className="payslip-row"><span>Days Worked</span><span /><span>{payModal.daysWorked} day{payModal.daysWorked !== 1 ? 's' : ''}</span></div>
                 <div className="payslip-row"><span>Monthly Base Salary</span><span /><span>{currency(payModal.monthlySal)}</span></div>
                 <div className="payslip-row"><span>Daily Rate ({WORKING_DAYS} working days)</span><span /><span>{currency(payModal.dailyRate)}</span></div>
-                <div className="payslip-row"><span>Regular Pay</span><span /><span>{currency(payModal.regularPay)}</span></div>
-                {payModal.holidayPremium > 0 && (
-                  <div className="payslip-row"><span>↳ incl. Holiday Premium ({payModal.holidayDaysWorked} day{payModal.holidayDaysWorked !== 1 ? 's' : ''} worked)</span><span /><span style={{ color: '#dc2626' }}>+{currency(payModal.holidayPremium)}</span></div>
-                )}
+                <div className="payslip-row"><span>Regular Pay ({payModal.daysWorked} days × {currency(payModal.dailyRate)})</span><span /><span>{currency(payModal.regularPay)}</span></div>
                 {payModal.otPay > 0 && <div className="payslip-row"><span>Overtime Pay (×1.25)</span><span /><span style={{ color: '#6c47ff' }}>{currency(payModal.otPay)}</span></div>}
                 <div className="payslip-total"><span>GROSS PAY FOR PERIOD</span><span /><span>{currency(payModal.grossPay)}</span></div>
               </div>
@@ -4288,11 +4190,9 @@ function AppInner() {
             {leaveForm.from && leaveForm.to && leaveForm.from <= leaveForm.to && (() => {
               const range = daysBetweenPH(leaveForm.from, leaveForm.to);
               const lt = leaveType(leaveForm.type);
-              const hits = range.map(isHolidayPH).filter(Boolean);
               return (
                 <div style={{ padding: 11, borderRadius: 10, marginBottom: 14, background: `${lt.color}11`, border: `1px solid ${lt.color}30`, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 13 }}>
                   {range.length} day{range.length !== 1 ? 's' : ''} · {lt.paidLabel}
-                  {hits.length > 0 && <div style={{ fontSize: 10, color: 'var(--amber)', marginTop: 5 }}>⚠ Range includes {hits.length} holiday{hits.length !== 1 ? 's' : ''}: {hits.map(h => h.name).join(', ')}</div>}
                 </div>
               );
             })()}
