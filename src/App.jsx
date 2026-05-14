@@ -751,25 +751,36 @@ function AppInner() {
           return { ...row, ...safe };
         } catch { return row; }
       };
-      const swaps = d.filter(i => ['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY'].includes(i.action)).map(parse);
-      const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
-      const escs_  = d.filter(i => i.action === 'ESCALATE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
-      const escAcks_ = d.filter(i => i.action === 'ESC_ACK').map(parse);
-      const mems_  = d.filter(i => i.action === 'MEMO').map(parse).sort((a,b) => b.timestamp - a.timestamp);
-      const acks_  = d.filter(i => i.action === 'ANN_ACK').map(parse);
+      // FIX v6.1: Normalize timestamp on every parsed row. Google Sheets often
+      // returns the `timestamp` column as a date string or Date object instead of
+      // a plain number. Without this, `Number(r.timestamp) >= todayMs()` returns
+      // `NaN >= ...` which is always false — and that's why late-unlock requests,
+      // quota shortfalls, ack records, and recent escalations were silently
+      // disappearing from the manager dashboard. `lRows` already did this fix
+      // for clock actions; we're now applying it to every category.
+      const normTs = r => ({
+        ...r,
+        timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() || 0,
+      });
+      const swaps = d.filter(i => ['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY'].includes(i.action)).map(parse).map(normTs);
+      const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
+      const escs_  = d.filter(i => i.action === 'ESCALATE').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
+      const escAcks_ = d.filter(i => i.action === 'ESC_ACK').map(parse).map(normTs);
+      const mems_  = d.filter(i => i.action === 'MEMO').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
+      const acks_  = d.filter(i => i.action === 'ANN_ACK').map(parse).map(normTs);
       // Late-unlock workflow: requests + grants
-      const lateReqs_   = d.filter(i => i.action === 'LATE_UNLOCK_REQUEST').map(parse).sort((a,b) => b.timestamp - a.timestamp);
-      const lateGrants_ = d.filter(i => i.action === 'LATE_UNLOCK').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const lateReqs_   = d.filter(i => i.action === 'LATE_UNLOCK_REQUEST').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
+      const lateGrants_ = d.filter(i => i.action === 'LATE_UNLOCK').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
       // Quota shortfalls (Helpwave clock-outs below quota)
-      const shortfalls_ = d.filter(i => i.action === 'QUOTA_SHORTFALL').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const shortfalls_ = d.filter(i => i.action === 'QUOTA_SHORTFALL').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
       // Leave system (NEW v5.1)
       const leaves_  = d.filter(i => ['LEAVE_REQUEST','LEAVE_APPROVE','LEAVE_DENY'].includes(i.action))
-        .map(parse).sort((a,b) => b.timestamp - a.timestamp);
+        .map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
       // Coaching notes (NEW v5.1)
-      const coaches_ = d.filter(i => i.action === 'COACHING_NOTE').map(parse).sort((a,b) => b.timestamp - a.timestamp);
+      const coaches_ = d.filter(i => i.action === 'COACHING_NOTE').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
       // Build latest day-off per agent (most recent DAYOFF_SET wins)
       const dayOffMap = {};
-      d.filter(i => i.action === 'DAYOFF_SET').map(parse)
+      d.filter(i => i.action === 'DAYOFF_SET').map(parse).map(normTs)
         .sort((a,b) => (Number(a.timestamp)||0) - (Number(b.timestamp)||0))
         .forEach(r => { if (r.agent && r.dayOff !== undefined) dayOffMap[r.agent] = Number(r.dayOff); });
 
@@ -1058,9 +1069,24 @@ function AppInner() {
     if (!lateLockState || lateLockState.state !== 'locked') return;
     setBusy(true);
     try {
+      const ts = Date.now();
+      // Optimistic local update: agent sees "Pending" chip instantly without
+      // waiting for the server round-trip. Manager picks it up on the next 30s poll.
+      const localReq = {
+        action: 'LATE_UNLOCK_REQUEST',
+        agent: user.name,
+        date: phNowDate(),
+        time: phNowTime(),
+        timestamp: ts,
+        shift: user.shift,
+        scheduledStart: lateLockState.sched,
+        lateBy: lateLockState.lateBy,
+        platform: user.platform,
+      };
+      setLateReqs(prev => [localReq, ...prev]);
       await post({
-        date: phNowDate(), time: phNowTime(),
-        action: 'LATE_UNLOCK_REQUEST', agent: user.name, timestamp: Date.now(),
+        date: localReq.date, time: localReq.time,
+        action: 'LATE_UNLOCK_REQUEST', agent: user.name, timestamp: ts,
         device: JSON.stringify({
           shift: user.shift, scheduledStart: lateLockState.sched,
           lateBy: lateLockState.lateBy, platform: user.platform,
@@ -2680,6 +2706,7 @@ function AppInner() {
                   {openEscals.length > 0 && <Chip color="var(--red)">🚨 {openEscals.length} ESCALATION{openEscals.length !== 1 ? 'S' : ''}</Chip>}
                   {pendingSwaps.length > 0 && <Chip color="var(--amber)">⇄ {pendingSwaps.length} SWAP{pendingSwaps.length !== 1 ? 'S' : ''}</Chip>}
                   {pendingLeaves.length > 0 && <Chip color="var(--amber)">🏖 {pendingLeaves.length} LEAVE{pendingLeaves.length !== 1 ? 'S' : ''}</Chip>}
+                  {pendingLateReqs.length > 0 && <Chip color="var(--red)">🔒 {pendingLateReqs.length} UNLOCK{pendingLateReqs.length !== 1 ? 'S' : ''}</Chip>}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -2704,6 +2731,7 @@ function AppInner() {
                 const pendingCount = agents.filter(a => a.status === 'pending').length;
                 let label = t.toUpperCase();
                 if (t === 'swaps' && pendingSwaps.length > 0) label = `SWAPS (${pendingSwaps.length})`;
+                else if (t === 'attendance' && pendingLateReqs.length > 0) label = `🔒 ATTENDANCE (${pendingLateReqs.length})`;
                 else if (t === 'leaves' && pendingLeaves.length > 0) label = `🏖 LEAVES (${pendingLeaves.length})`;
                 else if (t === 'leaves') label = '🏖 LEAVES';
                 else if (t === 'coaching') label = '💬 COACHING';
