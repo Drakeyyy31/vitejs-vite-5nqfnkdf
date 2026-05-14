@@ -1800,8 +1800,12 @@ function AppInner() {
     if (lateBy <= LATE_GRACE) return { state: 'grace', sched, lateBy };
     if (lateBy < LATE_LOCK_THRESHOLD) return { state: 'late', sched, lateBy };
     // 30+ min late — check for manager unlock today
-    const td = todayMs();
-    const granted = lateGrants.find(g => g.agent === user.name && Number(g.timestamp) >= td);
+    // New reliable logic
+    const todayStr = phNowDate(); 
+    const granted = lateGrants.find(g => 
+      g.agent === user.name && 
+      (g.date === todayStr || (g.scopedToDate && g.scopedToDate === todayStr))
+    );
     if (granted) return { state: 'unlocked', sched, lateBy, grantedBy: granted.grantedBy || granted.decidedBy };
     // Has the agent already requested? (so we can show "Pending" instead of "Request")
     const requested = lateReqs.find(r => r.agent === user.name && Number(r.timestamp) >= td);
