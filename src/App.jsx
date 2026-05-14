@@ -1738,11 +1738,24 @@ const safeParseTs = (row) => {
       const monthlySal   = agent.salary || 260;
       const dailyRate    = monthlySal / WORKING_DAYS;
       const hourlyRate   = dailyRate / 8;
-      const regularPay   = days.length * dailyRate;
-      const otPay        = (totalOtMs / 3_600_000) * hourlyRate * 1.25; // 125% OT rate
+
+      // Managers and Finance don't clock in. Calculate their days based on the date range automatically.
+      let daysWorked = days.length;
+      if (agent.role === 'Manager' || agent.role === 'Finance') {
+        daysWorked = 0;
+        let currentTs = new Date(fromTs).setHours(12, 0, 0, 0);
+        let endTs = new Date(toTs).setHours(12, 0, 0, 0);
+        while (currentTs <= endTs) {
+          if (new Date(currentTs).getDay() !== 0) daysWorked++; // Count every day except Sunday (0)
+          currentTs += 86_400_000;
+        }
+      }
+
+      const regularPay   = daysWorked * dailyRate;
+      const otPay        = 0; // STRICT POLICY: No overtime pay
       const grossPay     = regularPay + otPay;
 
-      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, grossPay, daysWorked: days.length };
+      return { ...agent, days, totalShiftMs, totalOtMs, monthlySal, dailyRate, hourlyRate, regularPay, otPay, grossPay, daysWorked };
     });
   }, [logs]);
 
@@ -1772,7 +1785,7 @@ const safeParseTs = (row) => {
   }, [payPeriod, payStart, payEnd]);
 
   const payrollData = useMemo(() => {
-    const activeAgents = agents.filter(a => a.status === 'active' && a.role === ROLE_AGENT);
+    const activeAgents = agents.filter(a => a.status === 'active'); 
     return calcPayroll(activeAgents, payRange.from, payRange.to);
   }, [agents, payRange, calcPayroll]);
 
@@ -4410,8 +4423,7 @@ function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPaySt
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 12 }}>
         {[
           { l: 'TOTAL GROSS PAY', v: currency(totalGross), c: 'var(--teal)' },
-          { l: 'OVERTIME PAY',    v: currency(totalOt),    c: 'var(--purple)' },
-          { l: 'AGENTS ON PAYROLL', v: payrollData.length, c: 'var(--blue)' },
+          { l: 'STAFF ON PAYROLL', v: payrollData.length, c: 'var(--blue)' },
           { l: 'TOTAL DAYS WORKED', v: totalDays,          c: 'var(--amber)' },
         ].map(s => (
           <div key={s.l} className="sc" style={{ background: 'rgba(0,0,0,.3)', border: '1px solid rgba(255,255,255,.07)' }}>
