@@ -1739,14 +1739,17 @@ const safeParseTs = (row) => {
       const dailyRate    = monthlySal / WORKING_DAYS;
       const hourlyRate   = dailyRate / 8;
 
-      // Managers and Finance don't clock in. Calculate their days based on the date range automatically.
-      let daysWorked = days.length;
-      if (agent.role === 'Manager' || agent.role === 'Finance') {
+      // Use manual override if it exists, otherwise use the auto-count
+      let daysWorked = (agent.manualDays !== undefined && agent.manualDays !== '') 
+                       ? Number(agent.manualDays) 
+                       : days.length;
+
+      if ((agent.manualDays === undefined || agent.manualDays === '') && (agent.role === 'Manager' || agent.role === 'Finance')) {
         daysWorked = 0;
         let currentTs = new Date(fromTs).setHours(12, 0, 0, 0);
         let endTs = new Date(toTs).setHours(12, 0, 0, 0);
         while (currentTs <= endTs) {
-          if (new Date(currentTs).getDay() !== 0) daysWorked++; // Count every day except Sunday (0)
+          if (new Date(currentTs).getDay() !== 0) daysWorked++;
           currentTs += 86_400_000;
         }
       }
