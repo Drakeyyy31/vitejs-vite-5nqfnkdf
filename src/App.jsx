@@ -732,14 +732,25 @@ function AppInner() {
 
 // --- BULLETPROOF TIMESTAMP PARSER (PH TIMEZONE FORCED) ---
 const safeParseTs = (row) => {
+  // If the Timestamp column exists in the sheet, use it instantly!
   let t = Number(row.timestamp);
-  if (t && !isNaN(t)) return t;
+  if (t > 1600000000000) return t; 
   
   let ds = String(row.date || '').trim();
   let ts = String(row.time || '').trim();
   if (!ds) return 0;
 
-  if (ds.includes('T')) ds = ds.split('T')[0];
+  // 🚨 CLEAN GOOGLE SHEETS GARBAGE DATA 🚨
+  // If Sheets sends a hidden 1899/UTC time string, convert it back to PH time
+  if (ts.includes('T')) {
+    const dObj = new Date(ts);
+    if (!isNaN(dObj)) ts = dObj.toLocaleTimeString('en-US', { timeZone: 'Asia/Manila' });
+  }
+  if (ds.includes('T')) {
+    const dObj = new Date(ds);
+    if (!isNaN(dObj)) ds = dObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+  }
+
   // 1. Extract Date reliably
   let y, m, d;
   if (ds.includes('/')) {
