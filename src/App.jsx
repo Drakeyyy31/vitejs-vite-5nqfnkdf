@@ -1760,6 +1760,7 @@ const safeParseTs = (row) => {
   }, [logs]);
 
   const payRange = useMemo(() => {
+    // 1. Calculate Weekly window
     if (payPeriod === 'week') {
       const now_ = new Date(); now_.setHours(0, 0, 0, 0);
       const dow = now_.getDay();
@@ -1770,6 +1771,8 @@ const safeParseTs = (row) => {
         to:   new Date(sun.toLocaleDateString('en-CA', { timeZone: PH_TZ }) + 'T23:59:59+08:00').getTime(),
       };
     }
+    
+    // 2. Calculate Monthly window
     if (payPeriod === 'month') {
       const now_ = new Date();
       const yr = now_.getFullYear(), mo = now_.getMonth();
@@ -1778,6 +1781,8 @@ const safeParseTs = (row) => {
         to:   new Date(`${yr}-${String(mo + 1).padStart(2, '0')}-${new Date(yr, mo + 1, 0).getDate()}T23:59:59+08:00`).getTime(),
       };
     }
+
+    // 3. CUSTOM RANGE (Use this for May 1 - May 13)
     return {
       from: new Date(payStart + 'T00:00:00+08:00').getTime(),
       to:   new Date(payEnd   + 'T23:59:59+08:00').getTime(),
