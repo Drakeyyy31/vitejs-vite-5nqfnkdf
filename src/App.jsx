@@ -195,7 +195,7 @@ const deriveStatus = (logs, name, rec, role) => {
   const last = [...logs.filter(l => l.agent === name && l.timestamp >= td)]
     .sort((a, b) => a.timestamp - b.timestamp).pop();
   if (!last) return ST.PENDING;
-  return { clockIn: ST.ACTIVE, breakStart: ST.BREAK, dutyPause: ST.PAUSED, clockOut: ST.OUT }[last.action] ?? ST.PENDING;
+  return { clockIn: ST.ACTIVE, breakStart: ST.BREAK, breakEnd: ST.ACTIVE, dutyPause: ST.PAUSED, dutyResume: ST.ACTIVE, clockOut: ST.OUT }[last.action] ?? ST.PENDING;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,6 +739,7 @@ const safeParseTs = (row) => {
   let ts = String(row.time || '').trim();
   if (!ds) return 0;
 
+  if (ds.includes('T')) ds = ds.split('T')[0];
   // 1. Extract Date reliably
   let y, m, d;
   if (ds.includes('/')) {
@@ -1648,7 +1649,7 @@ const safeParseTs = (row) => {
   const bPct      = Math.min(bMs / BREAK_MAX * 100, 100);
   const sPct      = Math.min(shMs / SHIFT_GOAL * 100, 100);
   const agentSt   = (user?.role === ROLE_MANAGER || user?.role === ROLE_FINANCE) ? ST.ONCALL
-    : rec.onPause ? ST.PAUSED : rec.onBreak ? ST.BREAK : (rec.clockIn && !rec.clockedOut) ? ST.ACTIVE : ST.PENDING;
+    : rec.onPause ? ST.PAUSED : rec.onBreak ? ST.BREAK : (rec.clockIn && !rec.clockedOut) ? ST.ACTIVE : (rec.clockedOut ? ST.OUT : ST.PENDING);
 
 
   // ── ATTENDANCE SUMMARY ──
@@ -3688,7 +3689,7 @@ const safeParseTs = (row) => {
                 {modal.tl.map((l, i) => (
                   <div className="tlrow" key={i}>
                     <div className="tldot" style={{ background: AC[l.action] || 'var(--sub)' }} />
-                    <div className="tlt">{l.time}</div>
+                    <div className="tlt">{phTimeShort(l.timestamp)}</div>
                     <div className="tla" style={{ color: AC[l.action] || 'var(--text)' }}>{AI[l.action]} {AL[l.action] || l.action}</div>
                   </div>
                 ))}
