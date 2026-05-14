@@ -1863,10 +1863,9 @@ function AppInner() {
   // Pending late-unlock requests that managers haven't granted yet.
   // Only shows requests from today (older ones are stale).
   const pendingLateReqs = useMemo(() => {
-    const td = todayMs();
-    const recent = lateReqs.filter(r => Number(r.timestamp) >= td);
-    // Filter out ones that already have a grant today
-    return recent.filter(r => !lateGrants.some(g => g.agent === r.agent && Number(g.timestamp) >= td));
+    const todayStr = phNowDate(); // Checks by date string instead of MS
+    const recent = lateReqs.filter(r => r.date === todayStr);
+    return recent.filter(r => !lateGrants.some(g => g.agent === r.agent && g.date === todayStr));
   }, [lateReqs, lateGrants]);
 
   // Today's quota shortfalls (Helpwave clock-outs below target)
