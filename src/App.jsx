@@ -32,11 +32,11 @@ const quotaForAgent = agent => {
 // LEAVE SYSTEM (NEW v5.1)
 // ─────────────────────────────────────────────────────────────────────────────
 // Distinct from day-off swaps. Date-range based. Manager approves.
-// Sick / Vacation / Bereavement = paid; Emergency / Personal = unpaid.
+// No work, no pay policy: All leaves are unpaid.
 const LEAVE_TYPES = [
-  { id: 'sick',        label: 'Sick Leave',  emoji: '🤒', color: 'var(--blue)',   paid: true,  paidLabel: 'PAID'   },
-  { id: 'vacation',    label: 'Vacation',    emoji: '🏖', color: 'var(--teal)',   paid: true,  paidLabel: 'PAID'   },
-  { id: 'bereavement', label: 'Bereavement', emoji: '🕊', color: 'var(--purple)', paid: true,  paidLabel: 'PAID'   },
+  { id: 'sick',        label: 'Sick Leave',  emoji: '🤒', color: 'var(--blue)',   paid: false, paidLabel: 'UNPAID' },
+  { id: 'vacation',    label: 'Vacation',    emoji: '🏖', color: 'var(--teal)',   paid: false, paidLabel: 'UNPAID' },
+  { id: 'bereavement', label: 'Bereavement', emoji: '🕊', color: 'var(--purple)', paid: false, paidLabel: 'UNPAID' },
   { id: 'emergency',   label: 'Emergency',   emoji: '🚨', color: 'var(--red)',    paid: false, paidLabel: 'UNPAID' },
   { id: 'personal',    label: 'Personal',    emoji: '📅', color: 'var(--amber)',  paid: false, paidLabel: 'UNPAID' },
 ];
