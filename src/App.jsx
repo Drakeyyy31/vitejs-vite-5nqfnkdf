@@ -2120,11 +2120,11 @@ const safeParseTs = (row) => {
   }, [escAcks]);
 
   const exportAttCSV = () => {
-    const rows = [['Agent','Position','Dept','Shift','Clock In','Clock Out','Break','Pause','Net Work','Overtime','Shift%','Status','Late']];
+    const rows = [['Agent','Position','Dept','Shift','Clock In','Clock Out','Break','Pause','Net Work','Shift%','Status','Late']];
     attend.forEach(a => rows.push([
       a.name, a.position || 'Agent', a.platform, a.shift || 'Morning',
       a.ci ? phTimeShort(a.ci) : '-', a.co ? phTimeShort(a.co) : '-',
-      fmtS(a.totB), fmtS(a.totP), fmtS(a.nMs), fmtS(a.otMs),
+      fmtS(a.totB), fmtS(a.totP), fmtS(a.nMs),
       `${a.sPct.toFixed(0)}%`, a.status.label, a.lateMs > 0 ? fmtS(a.lateMs) : '-',
     ]));
     const b = new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
@@ -2133,12 +2133,12 @@ const safeParseTs = (row) => {
   };
 
   const exportPayCSV = () => {
-    const rows = [['Agent','Position','Dept','Days Worked','Total Hours','OT Hours','Daily Rate','Regular Pay','OT Pay','Gross Pay']];
+    const rows = [['Agent','Position','Dept','Days Worked','Total Hours','Daily Rate','Regular Pay','Gross Pay']];
     payrollData.forEach(a => rows.push([
       a.name, a.position || 'Agent', a.platform, a.daysWorked,
-      fmtS(a.totalShiftMs), fmtS(a.totalOtMs),
+      fmtS(a.totalShiftMs),
       `USD ${a.dailyRate.toFixed(2)}`, `USD ${a.regularPay.toFixed(2)}`,
-      `USD ${a.otPay.toFixed(2)}`, `USD ${a.grossPay.toFixed(2)}`,
+      `USD ${a.grossPay.toFixed(2)}`,
     ]));
     const b = new Blob([rows.map(r => r.join(',')).join('\n')], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(b);
