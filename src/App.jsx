@@ -730,23 +730,48 @@ function AppInner() {
 
       const USER_ACTIONS = ['USER_REGISTER','USER_APPROVE','USER_PWCHANGE','USER_UPDATE','USER_DEACTIVATE','USER_REACTIVATE'];
 
-      // --- NEW HELPER TO FIX DATE CRASHES ---
-      const safeParseTs = (row) => {
-        let t = Number(row.timestamp);
-        if (t && !isNaN(t)) return t;
-        
-        let ds = String(row.date || '').trim();
-        let ts = String(row.time || '').trim();
-        let parsed = new Date(`${ds} ${ts}`).getTime();
-        
-        // Fallback if browser crashes on DD/MM/YYYY
-        if (isNaN(parsed) && ds.includes('/')) {
-          const p = ds.split('/');
-          if (p.length === 3) parsed = new Date(`${p[1]}/${p[0]}/${p[2]} ${ts}`).getTime();
-        }
-        return isNaN(parsed) ? 0 : parsed;
-      };
-      // ---------------------------------------
+// --- BULLETPROOF TIMESTAMP PARSER (PH TIMEZONE FORCED) ---
+const safeParseTs = (row) => {
+  let t = Number(row.timestamp);
+  if (t && !isNaN(t)) return t;
+  
+  let ds = String(row.date || '').trim();
+  let ts = String(row.time || '').trim();
+  if (!ds) return 0;
+
+  // 1. Extract Date reliably
+  let y, m, d;
+  if (ds.includes('/')) {
+    const p = ds.split('/');
+    if (Number(p[1]) > 12) { m = p[0]; d = p[1]; y = p[2]; } 
+    else { d = p[0]; m = p[1]; y = p[2]; } 
+  } else if (ds.includes('-')) {
+    const p = ds.split('-');
+    y = p[0]; m = p[1]; d = p[2];
+  }
+
+  // 2. Extract Time reliably (12h to 24h format)
+  let hr = 0, min = 0, sec = 0;
+  const tMatch = ts.match(/(\d+):(\d+):?(\d*)\s*(AM|PM|am|pm)?/);
+  if (tMatch) {
+    hr = Number(tMatch[1]);
+    min = Number(tMatch[2]);
+    sec = Number(tMatch[3] || 0);
+    const ampm = (tMatch[4] || '').toUpperCase();
+    if (ampm === 'PM' && hr < 12) hr += 12;
+    if (ampm === 'AM' && hr === 12) hr = 0;
+  }
+
+  // 3. Force the evaluation to happen in Philippines Time (+08:00)
+  if (y && m && d) {
+    const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}T${String(hr).padStart(2,'0')}:${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')}+08:00`;
+    const parsed = new Date(iso).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  
+  return 0;
+};
+// ---------------------------------------------------------
 
       const uRows = d.filter(i => USER_ACTIONS.includes(i.action))
         .map(r => ({ ...r, timestamp: safeParseTs(r) }))
