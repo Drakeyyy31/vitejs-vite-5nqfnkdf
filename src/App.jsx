@@ -729,11 +729,31 @@ function AppInner() {
       const d = await fetch(HOOK).then(r => r.json());
 
       const USER_ACTIONS = ['USER_REGISTER','USER_APPROVE','USER_PWCHANGE','USER_UPDATE','USER_DEACTIVATE','USER_REACTIVATE'];
+
+      // --- NEW HELPER TO FIX DATE CRASHES ---
+      const safeParseTs = (row) => {
+        let t = Number(row.timestamp);
+        if (t && !isNaN(t)) return t;
+        
+        let ds = String(row.date || '').trim();
+        let ts = String(row.time || '').trim();
+        let parsed = new Date(`${ds} ${ts}`).getTime();
+        
+        // Fallback if browser crashes on DD/MM/YYYY
+        if (isNaN(parsed) && ds.includes('/')) {
+          const p = ds.split('/');
+          if (p.length === 3) parsed = new Date(`${p[1]}/${p[0]}/${p[2]} ${ts}`).getTime();
+        }
+        return isNaN(parsed) ? 0 : parsed;
+      };
+      // ---------------------------------------
+
       const uRows = d.filter(i => USER_ACTIONS.includes(i.action))
-        .map(r => ({ ...r, timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() }))
+        .map(r => ({ ...r, timestamp: safeParseTs(r) }))
         .sort((a, b) => a.timestamp - b.timestamp); // ASC — latest action wins
+
       const lRows = d.filter(i => !i.action?.startsWith('USER_') && !['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY','ANNOUNCE','ESCALATE','MEMO','ANN_ACK','ESC_ACK','DAYOFF_SET','LATE_UNLOCK_REQUEST','LATE_UNLOCK','QUOTA_SHORTFALL','LEAVE_REQUEST','LEAVE_APPROVE','LEAVE_DENY','COACHING_NOTE'].includes(i.action))
-        .map(l => ({ ...l, timestamp: Number(l.timestamp) || new Date(`${l.date} ${l.time}`).getTime() }))
+        .map(l => ({ ...l, timestamp: safeParseTs(l) }))
         .sort((a, b) => b.timestamp - a.timestamp);
 
       // HARDENED parse: strip protected row-level keys from device JSON before merging.
@@ -751,16 +771,11 @@ function AppInner() {
           return { ...row, ...safe };
         } catch { return row; }
       };
-      // FIX v6.1: Normalize timestamp on every parsed row. Google Sheets often
-      // returns the `timestamp` column as a date string or Date object instead of
-      // a plain number. Without this, `Number(r.timestamp) >= todayMs()` returns
-      // `NaN >= ...` which is always false — and that's why late-unlock requests,
-      // quota shortfalls, ack records, and recent escalations were silently
-      // disappearing from the manager dashboard. `lRows` already did this fix
-      // for clock actions; we're now applying it to every category.
+
+      // FIX v6.1 & Date Crash Fix
       const normTs = r => ({
         ...r,
-        timestamp: Number(r.timestamp) || new Date(`${r.date} ${r.time}`).getTime() || 0,
+        timestamp: safeParseTs(r),
       });
       const swaps = d.filter(i => ['SWAP_REQUEST','SWAP_APPROVE','SWAP_DENY'].includes(i.action)).map(parse).map(normTs);
       const anns_  = d.filter(i => i.action === 'ANNOUNCE').map(parse).map(normTs).sort((a,b) => b.timestamp - a.timestamp);
