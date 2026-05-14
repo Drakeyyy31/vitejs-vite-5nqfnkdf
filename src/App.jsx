@@ -1619,7 +1619,6 @@ const safeParseTs = (row) => {
           platform: editForm.platform,
           shift: finalShift,
           salary,
-          manualDays: editForm.manualDays || '',
           kpiName: editForm.kpiName || '',
           updatedBy: user?.name,
         }),
@@ -1742,11 +1741,9 @@ const safeParseTs = (row) => {
       const hourlyRate   = dailyRate / 8;
 
       // Use manual override if it exists, otherwise use the auto-count
-      let daysWorked = (agent.manualDays !== undefined && agent.manualDays !== '') 
-                       ? Number(agent.manualDays) 
-                       : days.length;
+      let daysWorked = days.length;
 
-      if ((agent.manualDays === undefined || agent.manualDays === '') && (agent.role === 'Manager' || agent.role === 'Finance')) {
+      if (agent.role === 'Manager' || agent.role === 'Finance') {
         daysWorked = 0;
         let currentTs = new Date(fromTs).setHours(12, 0, 0, 0);
         let endTs = new Date(toTs).setHours(12, 0, 0, 0);
@@ -4059,7 +4056,6 @@ const safeParseTs = (row) => {
             <input className="inp gap" type="number" inputMode="numeric" value={editForm.salary} onChange={e => setEditForm({ ...editForm, salary: e.target.value })} />
             
             <label className="lbl">MANUAL DAYS WORKED (OVERRIDE)</label>
-            <input className="inp gap" type="number" placeholder="Leave blank for auto-count" value={editForm.manualDays} onChange={e => setEditForm({ ...editForm, manualDays: e.target.value })} />
             <label className="lbl">KPI DASHBOARD NAME (HOW THIS AGENT APPEARS IN THE {String(editForm.platform || '').toUpperCase()} SHEET)</label>
             <input className="inp" style={{ marginBottom: 14 }} type="text" placeholder="Leave blank to use display name" value={editForm.kpiName || ''} onChange={e => setEditForm({ ...editForm, kpiName: e.target.value })} />
             <div className="alert awn gap" style={{ fontSize: 11 }}>
