@@ -560,6 +560,7 @@ function AppInner() {
   const [payPeriod, setPayPeriod] = useState('week');
   const [payStart,  setPayStart]  = useState(tsKey());
   const [payEnd,    setPayEnd]    = useState(tsKey());
+  const [payrollOverrides, setPayrollOverrides] = useState({}); // { agentName: daysString }
 
   // ── KPI dashboards (META / Kanal / Helpwave / Refund) ──
   // All four dashboards are read from named ranges in their respective sheets
@@ -1794,9 +1795,18 @@ const safeParseTs = (row) => {
   }, [payPeriod, payStart, payEnd]);
 
   const payrollData = useMemo(() => {
-    const activeAgents = agents.filter(a => a.status === 'active'); 
-    return calcPayroll(activeAgents, payRange.from, payRange.to);
-  }, [agents, payRange, calcPayroll]);
+    const activeAgents = agents.filter(a => a.status === 'active');
+    return calcPayroll(activeAgents, payRange.from, payRange.to).map(a => {
+      const ov = payrollOverrides[a.name];
+      if (ov !== undefined && ov !== '') {
+        const daysWorked = Number(ov);
+        const regularPay = daysWorked * a.dailyRate;
+        const grossPay   = regularPay + a.otPay;
+        return { ...a, daysWorked, regularPay, grossPay, _periodOverride: true };
+      }
+      return a;
+    });
+  }, [agents, payRange, calcPayroll, payrollOverrides]);
 
   // ── AGENT'S OWN STATS — current period earnings preview + last 14 days ──
   const myStats = useMemo(() => {
@@ -2755,7 +2765,8 @@ const safeParseTs = (row) => {
               <PayrollPanel payrollData={payrollData} payPeriod={payPeriod} setPayPeriod={setPayPeriod}
                 payStart={payStart} setPayStart={setPayStart} payEnd={payEnd} setPayEnd={setPayEnd}
                 payRange={payRange} exportPayCSV={exportPayCSV} setPayModal={setPayModal}
-                agents={agents} logs={logs} />
+                agents={agents} logs={logs}
+                payrollOverrides={payrollOverrides} setPayrollOverrides={setPayrollOverrides} />
             )}
             {financeTab === 'refunds' && (
               <KpiPanel
@@ -3010,7 +3021,8 @@ const safeParseTs = (row) => {
               <PayrollPanel payrollData={payrollData} payPeriod={payPeriod} setPayPeriod={setPayPeriod}
                 payStart={payStart} setPayStart={setPayStart} payEnd={payEnd} setPayEnd={setPayEnd}
                 payRange={payRange} exportPayCSV={exportPayCSV} setPayModal={setPayModal}
-                agents={agents} logs={logs} />
+                agents={agents} logs={logs}
+                payrollOverrides={payrollOverrides} setPayrollOverrides={setPayrollOverrides} />
             )}
 
             {/* KPI DASHBOARDS — META / Kanal / Helpwave / Refund + Productivity */}
@@ -4246,9 +4258,13 @@ const safeParseTs = (row) => {
                   <span>Days Worked</span>
                   <span />
                   <span>
-                    {payModal.manualDays && payModal.manualDays !== '' ? (
+                    {payModal._periodOverride ? (
+                      <span style={{ color: 'var(--amber)', fontWeight: 700 }}>
+                        {payModal.daysWorked} (PERIOD OVERRIDE ✎)
+                      </span>
+                    ) : payModal.manualDays && payModal.manualDays !== '' ? (
                       <span style={{ color: 'var(--orange)', fontWeight: 700 }}>
-                        {payModal.manualDays} (MANUAL OVERRIDE)
+                        {payModal.manualDays} (PROFILE OVERRIDE)
                       </span>
                     ) : (
                       `${payModal.daysWorked} day${payModal.daysWorked !== 1 ? 's' : ''}`
@@ -4419,7 +4435,7 @@ export default function App() {
   );
 }
 
-function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPayStart, payEnd, setPayEnd, payRange, exportPayCSV, setPayModal }) {
+function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPayStart, payEnd, setPayEnd, payRange, exportPayCSV, setPayModal, payrollOverrides, setPayrollOverrides }) {
   const totalGross = payrollData.reduce((s, a) => s + a.grossPay, 0);
   const totalOt    = payrollData.reduce((s, a) => s + a.otPay, 0);
   const totalDays  = payrollData.reduce((s, a) => s + a.daysWorked, 0);
@@ -4430,14 +4446,14 @@ function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPaySt
       <Glass style={{ padding: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           {['week','month','custom'].map(p => (
-            <button key={p} className={`btn ${payPeriod === p ? 'bt' : 'bg'}`} style={{ fontSize: 11, minHeight: 38, padding: '7px 16px' }} onClick={() => setPayPeriod(p)}>
+            <button key={p} className={`btn ${payPeriod === p ? 'bt' : 'bg'}`} style={{ fontSize: 11, minHeight: 38, padding: '7px 16px' }} onClick={() => { setPayPeriod(p); setPayrollOverrides({}); }}>
               {p === 'week' ? 'THIS WEEK' : p === 'month' ? 'THIS MONTH' : 'CUSTOM'}
             </button>
           ))}
           {payPeriod === 'custom' && <>
-            <input className="inp" type="date" value={payStart} onChange={e => setPayStart(e.target.value)} style={{ width: 'auto', padding: '9px 12px', fontSize: 14 }} />
+            <input className="inp" type="date" value={payStart} onChange={e => { setPayStart(e.target.value); setPayrollOverrides({}); }} style={{ width: 'auto', padding: '9px 12px', fontSize: 14 }} />
             <span style={{ color: 'var(--sub)' }}>→</span>
-            <input className="inp" type="date" value={payEnd} onChange={e => setPayEnd(e.target.value)} style={{ width: 'auto', padding: '9px 12px', fontSize: 14 }} />
+            <input className="inp" type="date" value={payEnd} onChange={e => { setPayEnd(e.target.value); setPayrollOverrides({}); }} style={{ width: 'auto', padding: '9px 12px', fontSize: 14 }} />
           </>}
           <button className="btn bg" style={{ fontSize: 11, minHeight: 38, padding: '7px 14px', marginLeft: 'auto' }} onClick={exportPayCSV}>↓ EXPORT CSV</button>
         </div>
@@ -4469,12 +4485,25 @@ function PayrollPanel({ payrollData, payPeriod, setPayPeriod, payStart, setPaySt
               <div className="av" style={{ background: dg(a.platform), color: dc(a.platform) }}>{a.name[0]}</div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{a.name}</div>
-                <div style={{ fontSize: 10, color: dc(a.platform), fontFamily: 'var(--mono)', marginTop: 2 }}>◆ {a.platform} · {a.position || 'Agent'} · {a.daysWorked} day{a.daysWorked !== 1 ? 's' : ''}</div>
+                <div style={{ fontSize: 10, color: dc(a.platform), fontFamily: 'var(--mono)', marginTop: 2 }}>◆ {a.platform} · {a.position || 'Agent'} · {a.daysWorked} day{a.daysWorked !== 1 ? 's' : ''}{a._periodOverride ? ' ✎' : ''}</div>
                 <div style={{ marginTop: 5 }}>
                   <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden', width: 100 }}>
                     <div style={{ height: '100%', width: `${Math.min((a.grossPay / (a.monthlySal / WORKING_DAYS * 7)) * 100, 100)}%`, background: 'linear-gradient(90deg,var(--blue),var(--teal))', borderRadius: 2 }} />
                   </div>
                 </div>
+              </div>
+              {/* ── Manual days override input ── */}
+              <div onClick={e => e.stopPropagation()} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3, flexShrink: 0 }}>
+                <input
+                  type="number"
+                  min="0"
+                  max="31"
+                  placeholder={String(a.daysWorked)}
+                  value={payrollOverrides[a.name] ?? ''}
+                  onChange={e => setPayrollOverrides(prev => ({ ...prev, [a.name]: e.target.value }))}
+                  style={{ width: 52, padding: '4px 6px', fontSize: 13, fontFamily: 'var(--mono)', fontWeight: 700, textAlign: 'center', background: 'rgba(255,255,255,.07)', border: `1px solid ${payrollOverrides[a.name] ? 'var(--amber)' : 'rgba(255,255,255,.12)'}`, borderRadius: 6, color: payrollOverrides[a.name] ? 'var(--amber)' : 'var(--text)', outline: 'none' }}
+                />
+                <div style={{ fontSize: 9, color: 'var(--sub)', fontFamily: 'var(--mono)', letterSpacing: .3 }}>DAYS</div>
               </div>
               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 700, color: 'var(--teal)' }}>{currency(a.grossPay)}</div>
