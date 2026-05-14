@@ -1618,6 +1618,7 @@ const safeParseTs = (row) => {
           platform: editForm.platform,
           shift: finalShift,
           salary,
+          manualDays: editForm.manualDays || '',
           kpiName: editForm.kpiName || '',
           updatedBy: user?.name,
         }),
@@ -4241,7 +4242,19 @@ const safeParseTs = (row) => {
               ))}
               {payModal.days.length === 0 && <div style={{ color: '#888', padding: '8px 0', fontSize: 12 }}>No attendance records for this period.</div>}
               <div style={{ marginTop: 16, borderTop: '1px solid #ccc', paddingTop: 12 }}>
-                <div className="payslip-row"><span>Days Worked</span><span /><span>{payModal.daysWorked} day{payModal.daysWorked !== 1 ? 's' : ''}</span></div>
+                <div className="payslip-row">
+                  <span>Days Worked</span>
+                  <span />
+                  <span>
+                    {payModal.manualDays && payModal.manualDays !== '' ? (
+                      <span style={{ color: 'var(--orange)', fontWeight: 700 }}>
+                        {payModal.manualDays} (MANUAL OVERRIDE)
+                      </span>
+                    ) : (
+                      `${payModal.daysWorked} day${payModal.daysWorked !== 1 ? 's' : ''}`
+                    )}
+                  </span>
+                </div>
                 <div className="payslip-row"><span>Monthly Base Salary</span><span /><span>{currency(payModal.monthlySal)}</span></div>
                 <div className="payslip-row"><span>Daily Rate ({WORKING_DAYS} working days)</span><span /><span>{currency(payModal.dailyRate)}</span></div>
                 <div className="payslip-row"><span>Regular Pay ({payModal.daysWorked} days × {currency(payModal.dailyRate)})</span><span /><span>{currency(payModal.regularPay)}</span></div>
